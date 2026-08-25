@@ -5,6 +5,8 @@ import {
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { Icon, type IconName } from "./components/Icon";
+import { ProjectAvatar } from "./ProjectAvatar";
+import type { StoredProjectAvatar } from "./project-avatar";
 import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { ProviderGlyph } from "./ProviderGlyph";
@@ -24,6 +26,7 @@ import { resolveSnoozePresets } from "./lifecycle";
 export function ThreadCard({
   thread,
   projectName,
+  projectAvatar,
   isActive,
   canPark,
   park,
@@ -35,6 +38,8 @@ export function ThreadCard({
 }: {
   thread: PluginSidebarThread;
   projectName: string | null;
+  /** This project's stored avatar, or undefined for a generated monogram. */
+  projectAvatar?: StoredProjectAvatar;
   isActive: boolean;
   /** False while the thread is working or blocked on the user. */
   canPark: boolean;
@@ -87,6 +92,17 @@ export function ThreadCard({
             className="absolute inset-0 cursor-pointer rounded-md"
           />
           <div className="pointer-events-none relative flex h-5 items-center gap-1.5">
+            {/* Grouping, not labelling: the name is right there in words, and
+                the chip is what lets the eye sort the column into projects
+                before it reads any of it. Nothing here when the project is
+                unknown — an avatar for a name we do not have is a coloured
+                square that means nothing. */}
+            {projectName === null ? null : (
+              <ProjectAvatar
+                project={{ id: thread.projectId, name: projectName }}
+                stored={projectAvatar}
+              />
+            )}
             <span className="min-w-0 flex-1 truncate text-2xs font-medium text-muted-foreground">
               {projectName ?? " "}
             </span>

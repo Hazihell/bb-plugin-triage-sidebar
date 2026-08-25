@@ -11,6 +11,7 @@ import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { ThreadInbox } from "./src/ThreadInbox";
 import { ParentChip } from "./src/ParentChip";
 import { SubagentsChip } from "./src/SubagentsChip";
+import { ProjectAvatarSettings } from "./src/ProjectAvatarSettings";
 
 export default definePluginApp((app) => {
   app.slots.experimental_threadList({
@@ -38,5 +39,16 @@ export default definePluginApp((app) => {
     id: "children",
     title: "Child threads",
     component: SubagentsChip,
+  });
+
+  // Editing an avatar belongs here and nowhere else: it is per project, while
+  // every entry in the sidebar's right-click menu is per thread, and it is a
+  // decision made once rather than during triage.
+  app.slots.settingsSection({
+    id: "project-avatars",
+    title: "Project avatars",
+    description:
+      "One square per project, so the eye can group the list before it reads it. Set one yourself, or leave it to the git host's image and a generated monogram.",
+    component: ProjectAvatarSettings,
   });
 });

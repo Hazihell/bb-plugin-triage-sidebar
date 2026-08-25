@@ -891,3 +891,96 @@ describe("freezing the order while the user is on the list", () => {
     expect(rowTitles().map((t) => t?.includes("Alpha"))).toContain(true);
   });
 });
+
+describe("project avatars in the list", () => {
+  const withAvatars = (rows: unknown[]) =>
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "a", projectId: "prj_1" })],
+        projects: [{ id: "prj_1", name: "my cool app", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({ rows: [] }),
+        listProjectAvatars: () => ({ rows }),
+      } as never,
+    });
+
+  /** The card's first line: project, then the fixed-width status slot. */
+  function firstLine(): HTMLElement {
+    const row = screen.getAllByRole("listitem")[0]!;
+    return row.querySelectorAll(":scope > div > div")[0] as HTMLElement;
+  }
+
+  it("puts the avatar immediately before the project name", async () => {
+    withAvatars([]);
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(1));
+    const line = firstLine();
+    // The generated monogram for "my cool app".
+    expect(line.children[0]!.textContent).toBe("MC");
+    expect(line.children[1]!.textContent).toBe("my cool app");
+  });
+
+  // The card was explicitly not to be redesigned: one line, one status slot,
+  // one width, and the avatar has to fit inside that without moving anything.
+  it("leaves the line height and the status slot where they were", async () => {
+    withAvatars([]);
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(1));
+    const line = firstLine();
+    expect(line.className).toContain("h-5");
+    expect(line.lastElementChild!.className).toContain("w-12");
+    // Fixed size and no shrinking: an avatar that measured its own content
+    // would move the project name every time an image finished loading.
+    expect(line.children[0]!.className).toContain("size-3.5");
+    expect(line.children[0]!.className).toContain("shrink-0");
+  });
+
+  it("draws the stored avatar rather than the generated one", async () => {
+    withAvatars([
+      {
+        projectId: "prj_1",
+        customKind: "emoji",
+        customColor: null,
+        customInitials: null,
+        customEmoji: "🐙",
+        customImage: null,
+        remoteImage: null,
+        remoteUrl: null,
+        fetchedAt: null,
+        failedAt: null,
+        failureCount: null,
+      },
+    ]);
+    await waitFor(() => expect(screen.getAllByText("🐙").length).toBeGreaterThan(0));
+  });
+
+  // "All projects" is a scope, not a project: there is no identity to draw.
+  it("gives every project in the scope picker an avatar, and the scope none", async () => {
+    // Radix's Select drives its trigger through the Pointer Capture API, which
+    // jsdom does not implement; without these the menu cannot be opened here.
+    Object.assign(window.HTMLElement.prototype, {
+      hasPointerCapture: () => false,
+      setPointerCapture: () => {},
+      releasePointerCapture: () => {},
+      scrollIntoView: () => {},
+    });
+    withAvatars([]);
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(1));
+
+    const trigger = screen.getByLabelText("Project scope: All projects");
+    // The trigger mirrors the selection, so at "All projects" it shows no
+    // avatar either.
+    expect(within(trigger).queryByText("MC")).toBeNull();
+
+    // Opened from the keyboard: Radix's pointer path needs layout jsdom does
+    // not do, and the menu it renders is the same either way.
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const option = await screen.findByRole("option", { name: /my cool app/ });
+    expect(within(option).getByText("MC")).toBeDefined();
+    expect(
+      within(screen.getByRole("option", { name: "All projects" })).queryByText(
+        "MC",
+      ),
+    ).toBeNull();
+  });
+});

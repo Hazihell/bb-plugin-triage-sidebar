@@ -18,6 +18,8 @@ import { ThreadCard } from "./ThreadCard";
 import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { useLifecycle } from "./useLifecycle";
+import { useProjectAvatars } from "./useProjectAvatars";
+import { ProjectAvatar } from "./ProjectAvatar";
 import { TRAILING_GLYPH_BOX_CLASS } from "./StatusSlot";
 import {
   filterByProject,
@@ -54,6 +56,7 @@ export function ThreadInbox({
   const { status, threads, projects } = useSidebarThreads();
   const actions = useSidebarThreadActions();
   const lifecycle = useLifecycle(threads);
+  const avatars = useProjectAvatars();
   const [scope, setScope] = useState<string>(ALL_PROJECTS);
   // One clock for every card in a render, quantized to the minute so the
   // labels do not disagree and do not churn on unrelated re-renders.
@@ -150,6 +153,11 @@ export function ThreadInbox({
     scope === ALL_PROJECTS
       ? "All projects"
       : (projectNameById.get(scope) ?? "All projects");
+  // A scope pointing at a project the host no longer reports falls back to
+  // the "All projects" label above, so the avatar has to fall away with it
+  // rather than colouring a name that is not being shown.
+  const scopeProject =
+    scope === ALL_PROJECTS ? null : (projects.find((p) => p.id === scope) ?? null);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -163,9 +171,24 @@ export function ThreadInbox({
             className="h-7 min-w-0 flex-1 cursor-pointer border-0 px-1.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:bg-sidebar-accent focus:ring-0"
             aria-label={`Project scope: ${scopeLabel}`}
           >
-            <SelectValue />
+            {/* Children rather than the selected item's own text: the
+                trigger has to show the avatar too, and Radix renders only
+                text from the item it mirrors. */}
+            <SelectValue>
+              <span className="flex min-w-0 items-center gap-1.5">
+                {scopeProject === null ? null : (
+                  <ProjectAvatar
+                    project={scopeProject}
+                    stored={avatars.rows.get(scopeProject.id)}
+                  />
+                )}
+                <span className="truncate">{scopeLabel}</span>
+              </span>
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
+            {/* "All projects" is a scope, not a project — there is no
+                identity to draw, and a placeholder square would invent one. */}
             <SelectItem value={ALL_PROJECTS} className="text-xs">
               All projects
             </SelectItem>
@@ -175,7 +198,13 @@ export function ThreadInbox({
                 value={project.id}
                 className="text-xs"
               >
-                {project.name}
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <ProjectAvatar
+                    project={project}
+                    stored={avatars.rows.get(project.id)}
+                  />
+                  <span className="truncate">{project.name}</span>
+                </span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -220,6 +249,7 @@ export function ThreadInbox({
                     key={thread.id}
                     thread={thread}
                     projectName={projectNameById.get(thread.projectId) ?? null}
+                    projectAvatar={avatars.rows.get(thread.projectId)}
                     isActive={thread.id === activeThreadId}
                     canPark={lifecycle.canPark(thread)}
                     park={parkFor(thread)}
@@ -239,6 +269,7 @@ export function ThreadInbox({
                     key={thread.id}
                     thread={thread}
                     projectName={projectNameById.get(thread.projectId) ?? null}
+                    projectAvatar={avatars.rows.get(thread.projectId)}
                     isActive={thread.id === activeThreadId}
                     canPark={lifecycle.canPark(thread)}
                     park={parkFor(thread)}

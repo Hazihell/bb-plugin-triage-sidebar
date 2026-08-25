@@ -91,6 +91,7 @@ header shows no parent chip.
 | `experimental_useSidebarThreadSplit`               | dragging a card out to a split pane                                                         |
 | `experimental_useSidebarThreadPullRequest`         | the `#412` badge, coloured by bb's attention state                                          |
 | `@radix-ui/react-context-menu` (shimmed)           | this plugin's own right-click menu, built on the action hook                                |
+| `settingsSection`                                  | the per-project avatar editor (the only place an avatar is set)                |
 | `bb.storage.database()` + `bb.rpc` + `bb.realtime` | the settled/snoozed store                                                                   |
 
 The plugin API ships **no components**. Status glyphs and the right-click menu
