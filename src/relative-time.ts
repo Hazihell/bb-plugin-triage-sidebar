@@ -20,3 +20,20 @@ export function relativeTimeLabel(timestamp: number, now: number): string {
   if (elapsed < 7 * DAY) return `${Math.floor(elapsed / DAY)}d`;
   return `${Math.floor(elapsed / (7 * DAY))}w`;
 }
+
+/**
+ * How long a run has been going: "8s", "45s", "3m", "2h".
+ *
+ * Separate from {@link relativeTimeLabel} because a duration and an age answer
+ * different questions. An age under a minute is "now" — near enough that the
+ * exact figure is noise. A run under a minute is the opposite: it is the live
+ * one, the seconds are the whole point, and "now" reads as though the clock
+ * were broken.
+ */
+export function elapsedLabel(startedAt: number, now: number): string {
+  const elapsed = Math.max(0, now - startedAt);
+  if (elapsed < MINUTE) return `${Math.floor(elapsed / 1000)}s`;
+  if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m`;
+  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
+  return `${Math.floor(elapsed / DAY)}d`;
+}

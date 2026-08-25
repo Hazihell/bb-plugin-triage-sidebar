@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { relativeTimeLabel } from "./relative-time";
+import { elapsedLabel, relativeTimeLabel } from "./relative-time";
 
 const NOW = 1_000_000_000;
 const MINUTE = 60_000;
@@ -27,5 +27,23 @@ describe("relativeTimeLabel", () => {
   // is slightly in the future. It must not read as a negative age.
   it("treats a future timestamp as 'now'", () => {
     expect(relativeTimeLabel(NOW + 5 * MINUTE, NOW)).toBe("now");
+  });
+});
+
+describe("elapsedLabel", () => {
+  it("counts seconds under a minute, where a run is most likely to be watched", () => {
+    expect(elapsedLabel(NOW, NOW)).toBe("0s");
+    expect(elapsedLabel(NOW - 8_000, NOW)).toBe("8s");
+    expect(elapsedLabel(NOW - 59_000, NOW)).toBe("59s");
+  });
+
+  it("switches to coarser units as the run gets long", () => {
+    expect(elapsedLabel(NOW - MINUTE, NOW)).toBe("1m");
+    expect(elapsedLabel(NOW - 90 * MINUTE, NOW)).toBe("1h");
+    expect(elapsedLabel(NOW - 2 * DAY, NOW)).toBe("2d");
+  });
+
+  it("floors a clock that runs ahead of the start stamp at zero", () => {
+    expect(elapsedLabel(NOW + 5_000, NOW)).toBe("0s");
   });
 });

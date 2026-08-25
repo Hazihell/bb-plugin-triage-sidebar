@@ -1,7 +1,28 @@
+import { useEffect, useState } from "react";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import { StatusGlyph, hasStatusGlyph } from "./StatusGlyph";
 import { isWorking } from "./useLifecycle";
-import { relativeTimeLabel } from "./relative-time";
+import { elapsedLabel, relativeTimeLabel } from "./relative-time";
+
+/**
+ * A one-second clock, live only while `enabled`.
+ *
+ * The list's shared clock ticks once a minute, which is right for ages and
+ * wrong for a running timer: a run that started eight seconds ago would read
+ * the same for its first full minute. This ticker is deliberately local to the
+ * rows that need it, so a sidebar with one working thread re-renders one row a
+ * second rather than all of them.
+ */
+function useSecondsClock(enabled: boolean): number {
+  const [tick, setTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    setTick(Date.now());
+    const timer = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return tick;
+}
 
 /**
  * The row's trailing slot: one fixed width, right-aligned, on every row.
@@ -50,7 +71,9 @@ export function StatusOrTime({
    */
   startedWorkingAt?: number | null;
 }) {
-  if (startedWorkingAt !== null && isWorking(thread)) {
+  const isRunning = startedWorkingAt !== null && isWorking(thread);
+  const liveNow = useSecondsClock(isRunning);
+  if (isRunning) {
     return (
       <span className="flex items-center gap-1">
         {/* The thread's own glyph when it has one, so a workflow still reads
@@ -63,7 +86,7 @@ export function StatusOrTime({
           label={thread.indicatorLabel}
         />
         <span className="tabular-nums text-2xs text-muted-foreground">
-          {relativeTimeLabel(startedWorkingAt, now)}
+          {elapsedLabel(startedWorkingAt, Math.max(liveNow, now))}
         </span>
       </span>
     );
