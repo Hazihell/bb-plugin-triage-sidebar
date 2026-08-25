@@ -28,6 +28,11 @@ export interface LifecycleApi {
   shelfFor(thread: PluginSidebarThread): ThreadShelf;
   canPark(thread: PluginSidebarThread): boolean;
   wakeAtFor(thread: PluginSidebarThread): number | null;
+  /**
+   * When the thread's current run started, as bb recorded it, or null when it
+   * is not running or the store has never seen it run.
+   */
+  startedWorkingAtFor(threadId: string): number | null;
   settle(threadId: string): void;
   unsettle(threadId: string): void;
   snooze(threadId: string, snoozedUntil: number): void;
@@ -107,6 +112,11 @@ export function useLifecycle(
         resolveShelf(rows.get(thread.id), signalsFor(thread), now),
       canPark: (thread) => canPark(signalsFor(thread)),
       wakeAtFor: (thread) => rows.get(thread.id)?.snoozedUntil ?? null,
+      // `?? null` rather than a bare read: a row written before this column
+      // existed carries no value, and the caller wants "not running", not
+      // `undefined`.
+      startedWorkingAtFor: (threadId) =>
+        rows.get(threadId)?.startedWorkingAt ?? null,
       settle: (threadId) => void mutate("settle", threadId),
       unsettle: (threadId) => void mutate("unsettle", threadId),
       unsnooze: (threadId) => void mutate("unsnooze", threadId),

@@ -1,9 +1,12 @@
 // bb-plugin-triage-sidebar — an inbox-style replacement for bb's sidebar thread
 // list, and the reference example for `app.slots.experimental_threadList`.
 //
-// The idea it is built around: the list NEVER re-orders itself. Threads sort
-// by creation time, newest first, and hold that place. Status is carried by
-// each card, not by position, so the sidebar only moves when you act.
+// The idea it is built around: the list ranks by attention. A thread rises
+// when something on it needed you — a question, a finished turn, a failure —
+// and threads blocked on you come first, ahead of everything else. Pinned
+// threads sit above all of it and never leave the top. Each card still carries
+// its own status, so position tells you what to look at and the card tells you
+// why.
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { ThreadInbox } from "./src/ThreadInbox";
 import { ParentChip } from "./src/ParentChip";
@@ -13,7 +16,8 @@ export default definePluginApp((app) => {
   app.slots.experimental_threadList({
     id: "inbox",
     title: "Triage Sidebar",
-    description: "One flat list of cards, newest first, that never re-orders.",
+    description:
+      "Cards ranked by what needed you last — blocked threads first, pinned on top.",
     component: ThreadInbox,
   });
 

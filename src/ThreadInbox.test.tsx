@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
+import { resolveSnoozePresets } from "./lifecycle";
 
 // Load through the harness so the plugin's `@get-bb/plugin-sdk/app` import binds
 // to the test runtime; importing the component directly would bind it to an
@@ -74,6 +75,11 @@ function render(
 
 afterEach(cleanup);
 
+// The anchor is a full-bleed overlay, so the row containers carry the text.
+function rowTitles(): (string | null)[] {
+  return screen.getAllByRole("listitem").map((row) => row.textContent);
+}
+
 describe("triage-sidebar registration", () => {
   it("registers exactly one thread list", () => {
     expect(app.threadLists).toHaveLength(1);
@@ -82,17 +88,28 @@ describe("triage-sidebar registration", () => {
 });
 
 describe("ThreadInbox", () => {
-  it("lists threads newest first", () => {
+  it("lists the most recently needed thread first", () => {
     render([
-      thread({ id: "a", title: "Older", createdAt: 1 }),
-      thread({ id: "b", title: "Newer", createdAt: 2 }),
+      thread({ id: "a", title: "Quiet", latestAttentionAt: 1 }),
+      thread({ id: "b", title: "Touched", latestAttentionAt: 2 }),
     ]);
-    // The anchor is a full-bleed overlay, so read the row containers.
-    const titles = screen
-      .getAllByRole("listitem")
-      .map((row) => row.textContent);
-    expect(titles[0]).toContain("Newer");
-    expect(titles[1]).toContain("Older");
+    expect(rowTitles()[0]).toContain("Touched");
+    expect(rowTitles()[1]).toContain("Quiet");
+  });
+
+  // The sort's headline promise, end to end: a question waiting for an answer
+  // outranks a thread that was busy seconds ago.
+  it("floats a thread blocked on the user to the top", () => {
+    render([
+      thread({ id: "a", title: "Busy", latestAttentionAt: 9_000 }),
+      thread({
+        id: "b",
+        title: "Asking",
+        latestAttentionAt: 1,
+        hasPendingInteraction: true,
+      }),
+    ]);
+    expect(rowTitles()[0]).toContain("Asking");
   });
 
   // The DOM contract behind numbered thread shortcuts and thread.next/previous.
@@ -333,6 +350,77 @@ describe("parking threads", () => {
   });
 });
 
+describe("working duration", () => {
+  function renderWorking(startedWorkingAt: number | null) {
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({ id: "thr_run", title: "Running", indicator: "runtime" }),
+        ],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_run",
+              settledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+              startedWorkingAt,
+            },
+          ],
+        }),
+      },
+    });
+  }
+
+  // The one question a spinner cannot answer. Without this wiring the store
+  // records the start time and nothing ever reads it.
+  it("shows how long a working thread has been running", async () => {
+    // Anchored to the same minute boundary the list quantizes its clock to,
+    // or the label lands on either side of a bucket depending on the second
+    // the test happens to run in.
+    renderWorking(Math.floor(Date.now() / 60_000) * 60_000 - 7 * 60_000);
+    expect(await screen.findByText("7m")).toBeDefined();
+  });
+
+  it("shows no elapsed label when the store has no start time", async () => {
+    renderWorking(null);
+    expect(await screen.findByText("Running")).toBeDefined();
+    expect(screen.queryByText(/^\d+m$/)).toBeNull();
+  });
+
+  // The either/or rule the slot is built on: an idle row spends the slot on
+  // its age, never on a duration it is not accruing.
+  it("shows no elapsed label on a thread that is not working", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_idle", title: "Idle" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_idle",
+              settledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+              startedWorkingAt:
+                Math.floor(Date.now() / 60_000) * 60_000 - 7 * 60_000,
+            },
+          ],
+        }),
+      },
+    });
+    expect(await screen.findByText("Idle")).toBeDefined();
+    expect(screen.queryByText("7m")).toBeNull();
+  });
+});
+
 describe("row context menu", () => {
   it("offers the plugin's own thread actions on right-click", async () => {
     render([thread({ id: "thr_menu", title: "Right click me" })]);
@@ -345,7 +433,192 @@ describe("row context menu", () => {
       within(menu)
         .getAllByRole("menuitem")
         .map((item) => item.textContent),
+    ).toEqual([
+      // Parking leads the menu: it is the one thing this sidebar does that
+      // bb's own list does not.
+      "Settle",
+      "Snooze",
+      "Open in split",
+      "Mark unread",
+      "Pin",
+      "Archive",
+      "Delete",
+    ]);
+  });
+
+  // The mobile gap this menu closes: the card's settle and snooze are hover
+  // buttons, which a touch device has no way to reach. Radix opens this menu
+  // on long-press, so the items below are the only park route there.
+  it("parks a thread from the menu", async () => {
+    let settled: string | null = null;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_park", title: "Park me" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({ rows: [] }),
+        settle: (input) => {
+          settled = (input as { threadId: string }).threadId;
+          return { ok: true };
+        },
+      },
+    });
+    fireEvent.contextMenu(await screen.findByText("Park me"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    fireEvent.click(within(menu).getByText("Settle"));
+    await waitFor(() => expect(settled).toBe("thr_park"));
+  });
+
+  // The desktop gap: the card has room for ONE preset ("tomorrow"), and the
+  // other three are unreachable without this submenu.
+  it("offers every snooze preset in the submenu", async () => {
+    let snoozedUntil: number | null = null;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_snz", title: "Later please" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({ rows: [] }),
+        snooze: (input) => {
+          snoozedUntil = (input as { snoozedUntil: number }).snoozedUntil;
+          return { ok: true };
+        },
+      },
+    });
+    fireEvent.contextMenu(await screen.findByText("Later please"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    // Keyboard rather than hover: Radix opens a submenu on pointer-move only
+    // for a real mouse pointer, and jsdom's synthetic event has no pointerType.
+    fireEvent.keyDown(within(menu).getByText("Snooze"), { key: "ArrowRight" });
+    // Named "Snooze" after its trigger — Radix labels a submenu that way — and
+    // queried with `hidden` because it marks everything outside the open
+    // submenu aria-hidden, including the submenu's own ancestors.
+    const submenu = await screen.findByRole("menu", {
+      name: "Snooze",
+      hidden: true,
+    });
+    const labels = within(submenu)
+      .getAllByRole("menuitem", { hidden: true })
+      .map((item) => item.textContent);
+    // "This evening" drops out of the list after ~5pm, so it is the one preset
+    // this cannot assert unconditionally.
+    expect(labels).toContain("In 1 hour");
+    expect(labels).toContain("Tomorrow");
+    expect(labels).toContain("Next week");
+    expect(resolveSnoozePresets(new Date()).map((p) => p.label)).toEqual(
+      labels,
+    );
+
+    fireEvent.click(within(submenu).getByText("In 1 hour"));
+    await waitFor(() => expect(snoozedUntil).not.toBeNull());
+    expect(snoozedUntil!).toBeGreaterThan(Date.now());
+  });
+
+  it("offers the inverse actions on a thread that is already parked", async () => {
+    let unsettled: string | null = null;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_done", title: "Filed away" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_done",
+              settledAt: 200,
+              snoozedUntil: null,
+              snoozedAt: null,
+            },
+          ],
+        }),
+        unsettle: (input) => {
+          unsettled = (input as { threadId: string }).threadId;
+          return { ok: true };
+        },
+      },
+    });
+    const shelf = await screen.findByRole("region", { name: "Settled" });
+    fireEvent.click(within(shelf).getByRole("button"));
+    fireEvent.contextMenu(within(shelf).getByText("Filed away"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toContain("Un-settle");
+    expect(within(menu).queryByText("Settle")).toBeNull();
+    fireEvent.click(within(menu).getByText("Un-settle"));
+    await waitFor(() => expect(unsettled).toBe("thr_done"));
+  });
+
+  it("offers Wake now instead of Snooze on a snoozed thread", async () => {
+    let woken: string | null = null;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_snz", title: "Sleeping" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_snz",
+              settledAt: null,
+              snoozedUntil: Date.now() + 60 * 60 * 1000,
+              snoozedAt: Date.now(),
+            },
+          ],
+        }),
+        unsnooze: (input) => {
+          woken = (input as { threadId: string }).threadId;
+          return { ok: true };
+        },
+      },
+    });
+    const shelf = await screen.findByRole("region", { name: "Snoozed" });
+    fireEvent.click(within(shelf).getByRole("button"));
+    fireEvent.contextMenu(within(shelf).getByText("Sleeping"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    expect(within(menu).queryByText("Snooze")).toBeNull();
+    fireEvent.click(within(menu).getByText("Wake now"));
+    await waitFor(() => expect(woken).toBe("thr_snz"));
+  });
+
+  // The rule the whole feature turns on: hiding a thread that is still working
+  // is the one failure parking cannot afford, and the menu must not offer a
+  // route around the card's own refusal.
+  it("hides the park actions on a working thread", async () => {
+    render([
+      thread({ id: "thr_busy", title: "Still running", indicator: "runtime" }),
+    ]);
+    fireEvent.contextMenu(await screen.findByText("Still running"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
     ).toEqual(["Open in split", "Mark unread", "Pin", "Archive", "Delete"]);
+  });
+
+  it("hides the park actions on a thread blocked on the user", async () => {
+    render([
+      thread({
+        id: "thr_ask",
+        title: "Asking you",
+        hasPendingInteraction: true,
+      }),
+    ]);
+    fireEvent.contextMenu(await screen.findByText("Asking you"));
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    expect(within(menu).queryByText("Settle")).toBeNull();
+    expect(within(menu).queryByText("Snooze")).toBeNull();
   });
 
   it("routes deletion through the host's confirmation", async () => {
@@ -527,5 +800,94 @@ describe("pull request badge", () => {
     expect(
       (await screen.findByRole("link", { name: "#412" })).className,
     ).toContain("success");
+  });
+});
+
+// The list re-orders itself now, so it has to stop re-ordering exactly when
+// the user is aiming at it: a row that slides away mid-click sends the click
+// to the wrong thread.
+describe("freezing the order while the user is on the list", () => {
+  function scrollArea(rendered: { container: HTMLElement }): HTMLElement {
+    const area = rendered.container.querySelector<HTMLElement>(
+      "[data-triage-scroll]",
+    );
+    if (area === null) throw new Error("scroll area is not mounted");
+    return area;
+  }
+
+  // The harness hands the component one mutable thread array, so a host
+  // update is a rewrite of that array plus a nudge on the plugin's own
+  // realtime channel — the same channel a lifecycle write already re-renders
+  // through.
+  async function pushThreads(
+    rendered: {
+      emitRealtime: (channel: string, payload: unknown) => Promise<void>;
+    },
+    live: PluginSidebarThread[],
+    next: PluginSidebarThread[],
+  ) {
+    live.splice(0, live.length, ...next);
+    await rendered.emitRealtime("lifecycle", null);
+  }
+
+  it("holds the order while hovered and re-sorts once the pointer leaves", async () => {
+    const live = [
+      thread({ id: "a", title: "Alpha", latestAttentionAt: 2 }),
+      thread({ id: "b", title: "Beta", latestAttentionAt: 1 }),
+    ];
+    const rendered = render(live);
+    expect(rowTitles()[0]).toContain("Alpha");
+
+    fireEvent.pointerEnter(scrollArea(rendered));
+    await pushThreads(rendered, live, [
+      thread({ id: "a", title: "Alpha", latestAttentionAt: 2 }),
+      thread({ id: "b", title: "Beta", latestAttentionAt: 9 }),
+    ]);
+    expect(rowTitles()[0]).toContain("Alpha");
+
+    fireEvent.pointerLeave(scrollArea(rendered));
+    await waitFor(() => expect(rowTitles()[0]).toContain("Beta"));
+  });
+
+  // Focus is the keyboard user's cursor. Losing the pointer is not enough to
+  // start moving rows out from under it.
+  it("keeps holding while a row still has focus", async () => {
+    const live = [
+      thread({ id: "a", title: "Alpha", latestAttentionAt: 2 }),
+      thread({ id: "b", title: "Beta", latestAttentionAt: 1 }),
+    ];
+    const rendered = render(live);
+    fireEvent.focusIn(screen.getAllByRole("link")[0]!);
+    await pushThreads(rendered, live, [
+      thread({ id: "a", title: "Alpha", latestAttentionAt: 2 }),
+      thread({ id: "b", title: "Beta", latestAttentionAt: 9 }),
+    ]);
+    fireEvent.pointerLeave(scrollArea(rendered));
+    expect(rowTitles()[0]).toContain("Alpha");
+
+    fireEvent.focusOut(screen.getAllByRole("link")[0]!);
+    await waitFor(() => expect(rowTitles()[0]).toContain("Beta"));
+  });
+
+  // A frozen list is held still, not closed: a thread that arrives while the
+  // pointer is parked has to show up, in the place the fresh sort gives it.
+  it("still shows a thread that arrives while frozen", async () => {
+    const live = [
+      thread({ id: "a", title: "Alpha", latestAttentionAt: 2 }),
+      thread({ id: "b", title: "Beta", latestAttentionAt: 1 }),
+    ];
+    const rendered = render(live);
+    fireEvent.pointerEnter(scrollArea(rendered));
+    await pushThreads(rendered, live, [
+      ...live,
+      thread({
+        id: "c",
+        title: "Gamma",
+        latestAttentionAt: 1,
+        hasPendingInteraction: true,
+      }),
+    ]);
+    expect(rowTitles()[0]).toContain("Gamma");
+    expect(rowTitles().map((t) => t?.includes("Alpha"))).toContain(true);
   });
 });

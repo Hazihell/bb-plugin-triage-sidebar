@@ -6,7 +6,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { Icon, type IconName } from "./components/Icon";
 import { cn } from "./lib/utils";
-import { RowContextMenu } from "./RowContextMenu";
+import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { threadDisplayTitle } from "./inbox";
@@ -26,9 +26,11 @@ export function ThreadCard({
   projectName,
   isActive,
   canPark,
+  park,
   onNavigate,
   onSettle,
   onSnooze,
+  startedWorkingAt,
   now,
 }: {
   thread: PluginSidebarThread;
@@ -36,9 +38,17 @@ export function ThreadCard({
   isActive: boolean;
   /** False while the thread is working or blocked on the user. */
   canPark: boolean;
+  /** The same parking, offered from the right-click / long-press menu. */
+  park: ParkMenuActions;
   onNavigate: () => void;
   onSettle: () => void;
   onSnooze: (snoozedUntil: number) => void;
+  /**
+   * When bb recorded this thread's current run starting, or null when it is
+   * not running. Only a working row spends it, as an elapsed label beside the
+   * spinner.
+   */
+  startedWorkingAt: number | null;
   /** Quantized clock, so every card in one render agrees on "now". */
   now: number;
 }) {
@@ -49,7 +59,7 @@ export function ThreadCard({
   const { pullRequest } = useSidebarThreadPullRequest(thread.id);
 
   return (
-    <RowContextMenu thread={thread}>
+    <RowContextMenu thread={thread} park={park}>
       <li className="list-none">
         <div
           className={cn(
@@ -104,7 +114,11 @@ export function ThreadCard({
                 canPark && "group-hover/card:hidden",
               )}
             >
-              <StatusOrTime thread={thread} now={now} />
+              <StatusOrTime
+                thread={thread}
+                now={now}
+                startedWorkingAt={startedWorkingAt}
+              />
             </span>
           </div>
           <div
@@ -194,7 +208,7 @@ function ParkButton({
         event.stopPropagation();
         onActivate();
       }}
-      className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+      className="cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
     >
       <Icon name={icon} className="size-3.5" />
     </button>

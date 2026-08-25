@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useSidebarThreadActions as useSidebarThreadActions,
   experimental_useSidebarThreads as useSidebarThreads,
@@ -15,22 +15,32 @@ import {
   SelectValue,
 } from "./components/Select";
 import { ThreadCard } from "./ThreadCard";
+import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { useLifecycle } from "./useLifecycle";
 import { TRAILING_GLYPH_BOX_CLASS } from "./StatusSlot";
 import {
   filterByProject,
   hideChildrenOfVisibleParents,
+  orderBySnapshot,
   partitionPinned,
   searchThreadsByTitle,
-  sortByCreatedAtDescending,
+  sortByAttentionDescending,
   visibleInboxThreads,
 } from "./inbox";
+import { useFlipReorder } from "./useFlipReorder";
 
 const ALL_PROJECTS = "__all__";
 
 /**
- * The sidebar's scrolling list: one flat, statically ordered stack of cards.
+ * The sidebar's scrolling list: one flat stack of cards, ordered by attention.
+ *
+ * Ordering by attention means rows move, so two rules keep the movement from
+ * becoming noise. The list freezes its order while the pointer is over it or
+ * a row inside it holds keyboard focus, because a row must never slide out
+ * from under a cursor that is on its way to click. And when it does re-sort,
+ * each moved row is tweened from where it was, so the user sees a thread
+ * travel rather than a different list.
  *
  * The host owns the New-thread button and the search field above it, so this
  * ships neither. It filters by the `searchQuery` prop and keeps only the one
@@ -61,6 +71,19 @@ export function ThreadInbox({
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [showSettled, setShowSettled] = useState(false);
 
+  // The freeze is two independent inputs, not one: the pointer can leave while
+  // focus is still parked on a row (tab in, then move the mouse away), and
+  // re-sorting under a focused row would send the keyboard user somewhere else.
+  const [isPointerInside, setPointerInside] = useState(false);
+  const [hasFocusInside, setFocusInside] = useState(false);
+  const isFrozen = isPointerInside || hasFocusInside;
+  // The order the user is currently looking at, refreshed after every commit.
+  // While frozen it is the authority; the fresh sort only decides where
+  // threads it has never seen are slotted in.
+  const committedOrderRef = useRef<ReadonlyMap<string, number>>(new Map());
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useFlipReorder(scrollRef);
+
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects],
@@ -87,17 +110,41 @@ export function ThreadInbox({
       else active.push(thread);
     }
     const split = partitionPinned(active);
+    // Every shelf reads the same ranking, including the parked ones: a user
+    // who opens Snoozed is asking the same question as everywhere else, and a
+    // second ordering rule would be one more thing to learn.
+    const held = (sorted: PluginSidebarThread[]) =>
+      isFrozen ? orderBySnapshot(sorted, committedOrderRef.current) : sorted;
     return {
-      pinned: sortByCreatedAtDescending(split.pinned),
-      inbox: sortByCreatedAtDescending(split.inbox),
-      // Soonest wake first: "what comes back next" is the shelf's question.
-      snoozed: [...onSnoozeShelf].sort(
-        (left, right) =>
-          (lifecycle.wakeAtFor(left) ?? 0) - (lifecycle.wakeAtFor(right) ?? 0),
-      ),
-      settled: sortByCreatedAtDescending(onSettledShelf),
+      pinned: held(sortByAttentionDescending(split.pinned)),
+      inbox: held(sortByAttentionDescending(split.inbox)),
+      snoozed: held(sortByAttentionDescending(onSnoozeShelf)),
+      settled: held(sortByAttentionDescending(onSettledShelf)),
     };
-  }, [lifecycle, scope, searchQuery, threads]);
+  }, [isFrozen, lifecycle, scope, searchQuery, threads]);
+
+  // Recorded after the commit, so a frozen render re-reads the order it just
+  // showed: a thread that arrived mid-freeze is placed once and then stays put
+  // instead of being re-slotted on every unrelated re-render.
+  useLayoutEffect(() => {
+    const order = new Map<string, number>();
+    for (const thread of [...pinned, ...inbox, ...snoozed, ...settled]) {
+      order.set(thread.id, order.size);
+    }
+    committedOrderRef.current = order;
+  });
+
+  // One bundle per row, built where the lifecycle store lives. The card's
+  // hover buttons and the menu's items then drive the same four calls, so the
+  // two surfaces can never fall out of step.
+  const parkFor = (thread: PluginSidebarThread): ParkMenuActions => ({
+    canPark: lifecycle.canPark(thread),
+    shelf: lifecycle.shelfFor(thread),
+    onSettle: () => lifecycle.settle(thread.id),
+    onUnsettle: () => lifecycle.unsettle(thread.id),
+    onSnooze: (until) => lifecycle.snooze(thread.id, until),
+    onUnsnooze: () => lifecycle.unsnooze(thread.id),
+  });
 
   const scopeLabel =
     scope === ALL_PROJECTS
@@ -113,7 +160,7 @@ export function ThreadInbox({
           {/* Ghost trigger: no border, no filled track — it reads as a label
               until you hover it. */}
           <SelectTrigger
-            className="h-7 min-w-0 flex-1 border-0 px-1.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:bg-sidebar-accent focus:ring-0"
+            className="h-7 min-w-0 flex-1 cursor-pointer border-0 px-1.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:bg-sidebar-accent focus:ring-0"
             aria-label={`Project scope: ${scopeLabel}`}
           >
             <SelectValue />
@@ -135,7 +182,20 @@ export function ThreadInbox({
         </Select>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
+      <div
+        ref={scrollRef}
+        // React's onFocus/onBlur are focusin/focusout, so they fire for any
+        // row inside — a plain focus/blur pair on a container never would.
+        onPointerEnter={() => setPointerInside(true)}
+        onPointerLeave={() => setPointerInside(false)}
+        onFocus={() => setFocusInside(true)}
+        onBlur={() => setFocusInside(false)}
+        // The freeze tests address the scroll area by this attribute; it has
+        // no accessible name of its own, and inventing one would announce a
+        // wrapper that means nothing to a screen reader.
+        data-triage-scroll=""
+        className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
+      >
         {status === "loading" ? null : status === "error" ? (
           <p
             role="status"
@@ -162,9 +222,11 @@ export function ThreadInbox({
                     projectName={projectNameById.get(thread.projectId) ?? null}
                     isActive={thread.id === activeThreadId}
                     canPark={lifecycle.canPark(thread)}
+                    park={parkFor(thread)}
                     onNavigate={onNavigate}
                     onSettle={() => lifecycle.settle(thread.id)}
                     onSnooze={(until) => lifecycle.snooze(thread.id, until)}
+                    startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
                     now={now}
                   />
                 ))}
@@ -179,9 +241,11 @@ export function ThreadInbox({
                     projectName={projectNameById.get(thread.projectId) ?? null}
                     isActive={thread.id === activeThreadId}
                     canPark={lifecycle.canPark(thread)}
+                    park={parkFor(thread)}
                     onNavigate={onNavigate}
                     onSettle={() => lifecycle.settle(thread.id)}
                     onSnooze={(until) => lifecycle.snooze(thread.id, until)}
+                    startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
                     now={now}
                   />
                 ))}
@@ -195,6 +259,7 @@ export function ThreadInbox({
               shelf="snoozed"
               activeThreadId={activeThreadId}
               lifecycle={lifecycle}
+              parkFor={parkFor}
               onNavigate={onNavigate}
             />
             <ParkedShelf
@@ -205,6 +270,7 @@ export function ThreadInbox({
               shelf="settled"
               activeThreadId={activeThreadId}
               lifecycle={lifecycle}
+              parkFor={parkFor}
               onNavigate={onNavigate}
             />
           </>
@@ -227,6 +293,7 @@ function ParkedShelf({
   shelf,
   activeThreadId,
   lifecycle,
+  parkFor,
   onNavigate,
 }: {
   label: string;
@@ -236,6 +303,7 @@ function ParkedShelf({
   shelf: "snoozed" | "settled";
   activeThreadId: string | null;
   lifecycle: ReturnType<typeof useLifecycle>;
+  parkFor: (thread: PluginSidebarThread) => ParkMenuActions;
   onNavigate: () => void;
 }) {
   if (threads.length === 0) return null;
@@ -248,7 +316,7 @@ function ParkedShelf({
         aria-expanded={expanded}
         // Padded like a card, so the chevron ends on the same right edge as
         // every row's status and provider glyph.
-        className="mt-3 flex w-full items-center gap-2 px-2.5 pb-1 text-left"
+        className="mt-3 flex w-full cursor-pointer items-center gap-2 px-2.5 pb-1 text-left"
       >
         <span className="text-2xs font-medium text-muted-foreground/70">
           {expanded ? label : `${label} (${threads.length})`}
@@ -274,6 +342,7 @@ function ParkedShelf({
               shelf={shelf}
               wakeAt={lifecycle.wakeAtFor(thread)}
               now={now}
+              park={parkFor(thread)}
               onNavigate={onNavigate}
               onRestore={() =>
                 shelf === "snoozed"

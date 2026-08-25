@@ -4,10 +4,11 @@ import {
   childrenOf,
   filterByProject,
   hideChildrenOfVisibleParents,
+  orderBySnapshot,
   parentOf,
   partitionPinned,
   searchThreadsByTitle,
-  sortByCreatedAtDescending,
+  sortByAttentionDescending,
   threadDisplayTitle,
   visibleInboxThreads,
 } from "./inbox";
@@ -48,44 +49,132 @@ function thread(
   };
 }
 
-describe("sortByCreatedAtDescending", () => {
-  it("puts the newest thread first", () => {
-    const ordered = sortByCreatedAtDescending([
-      thread({ id: "a", createdAt: 1 }),
-      thread({ id: "b", createdAt: 3 }),
-      thread({ id: "c", createdAt: 2 }),
+describe("sortByAttentionDescending", () => {
+  it("puts the most recently needed thread first", () => {
+    const ordered = sortByAttentionDescending([
+      thread({ id: "a", latestAttentionAt: 1 }),
+      thread({ id: "b", latestAttentionAt: 3 }),
+      thread({ id: "c", latestAttentionAt: 2 }),
     ]);
     expect(ordered.map((t) => t.id)).toEqual(["b", "c", "a"]);
   });
 
-  // The whole premise: activity must never move a row. Only createdAt is read,
-  // so a thread that just did work keeps its place.
-  it("ignores activity and update time", () => {
-    const before = [
-      thread({ id: "a", createdAt: 2, updatedAt: 1 }),
-      thread({ id: "b", createdAt: 1, updatedAt: 999, indicator: "runtime" }),
-    ];
-    expect(sortByCreatedAtDescending(before).map((t) => t.id)).toEqual([
-      "a",
-      "b",
+  // The one rule that beats the clock: a thread with a question on screen is
+  // the only thread the user cannot make progress anywhere else without.
+  it("floats a blocked thread above every timestamp", () => {
+    const ordered = sortByAttentionDescending([
+      thread({ id: "fresh", latestAttentionAt: 9_000 }),
+      thread({
+        id: "blocked",
+        latestAttentionAt: 1,
+        hasPendingInteraction: true,
+      }),
+    ]);
+    expect(ordered.map((t) => t.id)).toEqual(["blocked", "fresh"]);
+  });
+
+  it("ranks two blocked threads by attention time", () => {
+    const ordered = sortByAttentionDescending([
+      thread({
+        id: "older",
+        hasPendingInteraction: true,
+        latestAttentionAt: 1,
+      }),
+      thread({
+        id: "newer",
+        hasPendingInteraction: true,
+        latestAttentionAt: 2,
+      }),
+    ]);
+    expect(ordered.map((t) => t.id)).toEqual(["newer", "older"]);
+  });
+
+  // Creation time no longer decides anything, and a thread that was touched
+  // long after it was created has to rise.
+  it("ignores creation time", () => {
+    const ordered = sortByAttentionDescending([
+      thread({ id: "old-but-active", createdAt: 1, latestAttentionAt: 9 }),
+      thread({ id: "new-but-quiet", createdAt: 9, latestAttentionAt: 1 }),
+    ]);
+    expect(ordered.map((t) => t.id)).toEqual([
+      "old-but-active",
+      "new-but-quiet",
     ]);
   });
 
+  // A total order, so the same set renders in the same order every time no
+  // matter how the host happened to hand it over.
   it("breaks ties on id so the order is stable", () => {
-    const ordered = sortByCreatedAtDescending([
-      thread({ id: "b", createdAt: 5 }),
-      thread({ id: "a", createdAt: 5 }),
+    const input = [
+      thread({ id: "b", latestAttentionAt: 5 }),
+      thread({ id: "a", latestAttentionAt: 5 }),
+      thread({ id: "c", latestAttentionAt: 5 }),
+    ];
+    expect(sortByAttentionDescending(input).map((t) => t.id)).toEqual([
+      "a",
+      "b",
+      "c",
     ]);
-    expect(ordered.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(
+      sortByAttentionDescending([...input].reverse()).map((t) => t.id),
+    ).toEqual(["a", "b", "c"]);
   });
 
   it("does not mutate its input", () => {
     const input = [
-      thread({ id: "a", createdAt: 1 }),
-      thread({ id: "b", createdAt: 2 }),
+      thread({ id: "a", latestAttentionAt: 1 }),
+      thread({ id: "b", latestAttentionAt: 2 }),
     ];
-    sortByCreatedAtDescending(input);
+    sortByAttentionDescending(input);
     expect(input.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("orderBySnapshot", () => {
+  const ids = (threads: { id: string }[]) => threads.map((t) => t.id);
+  const snapshot = (...order: string[]) =>
+    new Map(order.map((id, index) => [id, index]));
+
+  it("holds the remembered order over a fresh sort", () => {
+    const held = orderBySnapshot(
+      [thread({ id: "c" }), thread({ id: "a" }), thread({ id: "b" })],
+      snapshot("a", "b", "c"),
+    );
+    expect(ids(held)).toEqual(["a", "b", "c"]);
+  });
+
+  it("drops a thread the fresh list no longer has", () => {
+    const held = orderBySnapshot(
+      [thread({ id: "a" }), thread({ id: "c" })],
+      snapshot("a", "b", "c"),
+    );
+    expect(ids(held)).toEqual(["a", "c"]);
+  });
+
+  // A thread that arrives mid-freeze must still be reachable, and one that
+  // sorts above everything belongs on top, not appended at the bottom.
+  it("places an arrival at its natural position", () => {
+    const held = orderBySnapshot(
+      [thread({ id: "new" }), thread({ id: "a" }), thread({ id: "b" })],
+      snapshot("b", "a"),
+    );
+    expect(ids(held)).toEqual(["new", "b", "a"]);
+  });
+
+  it("places an arrival after the remembered thread it follows", () => {
+    const held = orderBySnapshot(
+      [thread({ id: "a" }), thread({ id: "new" }), thread({ id: "b" })],
+      snapshot("b", "a"),
+    );
+    expect(ids(held)).toEqual(["b", "a", "new"]);
+  });
+
+  it("returns the fresh sort when nothing was remembered", () => {
+    const held = orderBySnapshot(
+      [thread({ id: "b" }), thread({ id: "a" })],
+      new Map(),
+    );
+    expect(ids(held)).toEqual(["b", "a"]);
   });
 });
 

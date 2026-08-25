@@ -14,6 +14,12 @@ export interface ThreadLifecycleRow {
   snoozedUntil: number | null;
   /** When the snooze was set — used to detect activity since. */
   snoozedAt: number | null;
+  /**
+   * When bb last reported this thread starting work; null when it is not
+   * running. Written by the backend from bb's thread events, never by the UI:
+   * a browser-side timer would restart on every remount.
+   */
+  startedWorkingAt: number | null;
 }
 
 /** The activity signals that outrank a user's parking decision. */

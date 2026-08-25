@@ -4,7 +4,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { Icon } from "./components/Icon";
 import { cn } from "./lib/utils";
-import { RowContextMenu } from "./RowContextMenu";
+import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { threadDisplayTitle } from "./inbox";
 import { snoozeWakeLabel } from "./lifecycle";
@@ -22,6 +22,7 @@ export function SlimRow({
   shelf,
   wakeAt,
   now,
+  park,
   onNavigate,
   onRestore,
 }: {
@@ -30,6 +31,8 @@ export function SlimRow({
   shelf: "snoozed" | "settled";
   wakeAt: number | null;
   now: number;
+  /** Parking from the right-click / long-press menu, as on a card. */
+  park: ParkMenuActions;
   onNavigate: () => void;
   onRestore: () => void;
 }) {
@@ -37,7 +40,7 @@ export function SlimRow({
   const title = threadDisplayTitle(thread);
 
   return (
-    <RowContextMenu thread={thread}>
+    <RowContextMenu thread={thread} park={park}>
       <li className="list-none">
         <div
           className={cn(
@@ -102,7 +105,7 @@ export function SlimRow({
               }}
               // Pulled right by its own padding, so the icon — not the hit
               // area — lands on the column.
-              className="pointer-events-auto absolute -right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover/slim:opacity-100"
+              className="pointer-events-auto absolute -right-0.5 top-1/2 cursor-pointer -translate-y-1/2 rounded p-0.5 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover/slim:opacity-100"
             >
               <Icon
                 name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}

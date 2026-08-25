@@ -17,6 +17,26 @@ import { cn } from "./lib/utils";
  */
 
 /**
+ * Colour carries the state, so a glance at the column answers "what does this
+ * list want from me" before any icon is read: blue is the machine working,
+ * green is a finished turn, red is a failure, amber is the one state that is
+ * waiting on the human. Everything else stays neutral — a fifth hue would only
+ * dilute the four that mean something.
+ *
+ * Every value is a bb theme token, never a literal colour. The plugin build
+ * emits utilities against the DEFAULT theme's variables, so a hardcoded oklch
+ * or a Tailwind gray would keep its own colour under a custom palette and
+ * clash with the surface it sits on.
+ *
+ * `attention` is bb's own "amber dot" token, which is what waiting-for-input
+ * is; `timeline-accent` is the default theme's blue and the only blue token
+ * the plugin theme exposes.
+ */
+const LIVE_WORK_COLOR = "text-timeline-accent";
+const WAITING_COLOR = "text-attention";
+const IDLE_COLOR = "text-muted-foreground/50";
+
+/**
  * Whether this indicator draws a glyph that speaks for the row.
  *
  * The row gives the glyph and the age ONE slot, so this decides which of the
@@ -67,11 +87,13 @@ export function StatusGlyph({
         />
       );
     case "waiting-for-input":
+      // Full strength, unlike every other glyph: this is the only state where
+      // nothing moves until the user acts, and a muted icon read as "later".
       return (
         <Icon
           name="CircleQuestion"
           aria-label={aria}
-          className={cn(shared, "text-muted-foreground/75")}
+          className={cn(shared, WAITING_COLOR)}
         />
       );
     case "runtime":
@@ -79,19 +101,54 @@ export function StatusGlyph({
         <Icon
           name="Loading"
           aria-label={aria}
-          className={cn(shared, "animate-spin text-muted-foreground/50")}
+          className={cn(shared, "animate-spin", LIVE_WORK_COLOR)}
         />
       );
     case "workflow":
-      return <ShineIcon name="Workflow" label={aria} className={shared} />;
+      return (
+        <ShineIcon
+          name="Workflow"
+          label={aria}
+          color={LIVE_WORK_COLOR}
+          className={shared}
+        />
+      );
     case "background-agent":
-      return <ShineIcon name="UserRoundPlus" label={aria} className={shared} />;
+      return (
+        <ShineIcon
+          name="UserRoundPlus"
+          label={aria}
+          color={LIVE_WORK_COLOR}
+          className={shared}
+        />
+      );
     case "background-command":
-      return <ShineIcon name="Terminal" label={aria} className={shared} />;
+      return (
+        <ShineIcon
+          name="Terminal"
+          label={aria}
+          color={LIVE_WORK_COLOR}
+          className={shared}
+        />
+      );
     case "plan-mode":
-      return <ShineIcon name="ListTodo" label={aria} className={shared} />;
+      return (
+        <ShineIcon
+          name="ListTodo"
+          label={aria}
+          color={IDLE_COLOR}
+          className={shared}
+        />
+      );
     case "goal":
-      return <ShineIcon name="Target" label={aria} className={shared} />;
+      return (
+        <ShineIcon
+          name="Target"
+          label={aria}
+          color={IDLE_COLOR}
+          className={shared}
+        />
+      );
     case "draft":
     case "working-draft":
       return (
@@ -110,7 +167,7 @@ export function StatusGlyph({
           aria-label={aria}
           className={cn("flex items-center justify-center", shared)}
         >
-          <span className="size-[5px] rounded-full bg-timeline-accent" />
+          <span className="size-[5px] rounded-full bg-success" />
         </span>
       );
     case "none":
@@ -123,17 +180,19 @@ export function StatusGlyph({
 function ShineIcon({
   name,
   label,
+  color,
   className,
 }: {
   name: "Workflow" | "UserRoundPlus" | "Terminal" | "ListTodo" | "Target";
   label: string | undefined;
+  color: string;
   className: string;
 }) {
   return (
     <Icon
       name={name}
       aria-label={label}
-      className={cn("animate-shine-icon text-muted-foreground/50", className)}
+      className={cn("animate-shine-icon", color, className)}
     />
   );
 }

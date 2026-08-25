@@ -24,6 +24,7 @@ const row = (
   settledAt: null,
   snoozedUntil: null,
   snoozedAt: null,
+  startedWorkingAt: null,
   ...overrides,
 });
 

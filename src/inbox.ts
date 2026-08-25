@@ -1,20 +1,82 @@
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 
 /**
- * The sort that defines this sidebar: newest thread on top, and NOTHING moves
- * it afterwards. Activity never re-orders the list, so a row holds its place
- * from creation until you park it and the screen only changes when you act.
- * Status is carried by the card, not by position.
+ * The attention sort that defines this sidebar: threads order by the most
+ * recent thing that needed you, and a thread blocked on your input outranks
+ * everything else.
  *
- * Ties break on id so the order is total and stable across renders.
+ * `hasPendingInteraction` is not merely "attention, very recently". It is a
+ * question already on screen waiting for an answer, so it takes a key no
+ * timestamp can ever reach instead of a large bonus that a busy afternoon of
+ * other threads could out-age.
+ *
+ * Ties break on attention time and then on id, so the order is total: two
+ * threads never swap places between renders just because the host handed the
+ * list over in a different order.
  */
-export function sortByCreatedAtDescending<
-  T extends { readonly id: string; readonly createdAt: number },
->(threads: readonly T[]): T[] {
+export function sortByAttentionDescending<T extends AttentionRanked>(
+  threads: readonly T[],
+): T[] {
   return [...threads].sort(
     (left, right) =>
-      right.createdAt - left.createdAt || left.id.localeCompare(right.id),
+      attentionKey(right) - attentionKey(left) ||
+      right.latestAttentionAt - left.latestAttentionAt ||
+      left.id.localeCompare(right.id),
   );
+}
+
+/** The minimum a thread must carry to be ranked by attention. */
+interface AttentionRanked {
+  readonly id: string;
+  readonly hasPendingInteraction: boolean;
+  readonly latestAttentionAt: number;
+}
+
+function attentionKey(thread: AttentionRanked): number {
+  return thread.hasPendingInteraction
+    ? Number.MAX_SAFE_INTEGER
+    : thread.latestAttentionAt;
+}
+
+/**
+ * Re-orders a freshly sorted list to match a snapshot of ids captured on an
+ * earlier commit, which is how the list holds still while the pointer is over
+ * it: a row must not slide out from under the cursor mid-click.
+ *
+ * A thread the snapshot never saw — it arrived while the list was frozen —
+ * still appears, placed directly after whichever remembered thread precedes
+ * it in the fresh sort. That is its natural position expressed in terms of
+ * the neighbours the frozen list is actually showing, so a brand-new blocked
+ * thread lands on top rather than being parked at the bottom until the
+ * pointer leaves.
+ */
+export function orderBySnapshot<T extends { readonly id: string }>(
+  sorted: readonly T[],
+  snapshot: ReadonlyMap<string, number>,
+): T[] {
+  // Arrivals keyed by the remembered thread they follow; null means "before
+  // every remembered thread", i.e. the head of the list.
+  const arrivals = new Map<string | null, T[]>();
+  const remembered: T[] = [];
+  let predecessor: string | null = null;
+  for (const thread of sorted) {
+    if (snapshot.has(thread.id)) {
+      remembered.push(thread);
+      predecessor = thread.id;
+      continue;
+    }
+    const bucket = arrivals.get(predecessor);
+    if (bucket) bucket.push(thread);
+    else arrivals.set(predecessor, [thread]);
+  }
+  remembered.sort(
+    (left, right) => snapshot.get(left.id)! - snapshot.get(right.id)!,
+  );
+  const ordered: T[] = [...(arrivals.get(null) ?? [])];
+  for (const thread of remembered) {
+    ordered.push(thread, ...(arrivals.get(thread.id) ?? []));
+  }
+  return ordered;
 }
 
 export function threadDisplayTitle(thread: PluginSidebarThread): string {
@@ -58,7 +120,7 @@ export function visibleInboxThreads(
   return threads.filter((thread) => !thread.isArchived);
 }
 
-/** Pinned first (they are the user's own ordering), then the static sort. */
+/** Pinned first (they are the user's own shelf), then the attention sort. */
 export function partitionPinned(threads: readonly PluginSidebarThread[]): {
   pinned: PluginSidebarThread[];
   inbox: PluginSidebarThread[];
