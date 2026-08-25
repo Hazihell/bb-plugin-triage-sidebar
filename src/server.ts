@@ -1316,15 +1316,18 @@ export default function plugin(bb: BbPluginApi) {
     );
   };
 
-  // Daily is the right cadence for a picture that changes once a year, and it
-  // keeps the plugin's traffic to a git host down to one request per project.
+  // A discovery sweep, not a refresh. An image that arrived is never asked for
+  // again (see `shouldRefetch`), so this daily run only picks up a project
+  // added since the last one — for a machine left running, the alternative is
+  // waiting for a reload. A project that already has its avatar costs one
+  // local stat here and no request at all.
   bb.background.schedule("project-avatars", "0 4 * * *", sweepAvatars);
 
   // A first sweep on load, so a freshly installed plugin — or a project added
-  // since yesterday — does not wait until 4am for its avatar. Deferred off the
-  // factory: a plugin that blocks its own load on a network round-trip delays
-  // every other plugin behind it, and the sidebar renders monograms until the
-  // images land anyway.
+  // while bb was closed — gets its avatar without waiting for 4am. Deferred off
+  // the factory: a plugin that blocks its own load on a network round-trip
+  // delays every other plugin behind it, and the sidebar renders monograms
+  // until the images land anyway.
   const initialSweep = setTimeout(() => {
     void sweepAvatars().catch((error: unknown) => {
       bb.log.warn(`project-avatars: initial sweep failed (${String(error)})`);

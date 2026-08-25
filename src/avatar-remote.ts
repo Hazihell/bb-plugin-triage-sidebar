@@ -8,8 +8,15 @@
  * testable without a socket, a clock, or a database.
  */
 
-/** How long a successful cache stays fresh before it is refetched. */
-export const AVATAR_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long a successful cache stays fresh — forever, on purpose.
+ *
+ * Infinity rather than a deleted branch: the expiry is a policy, and writing it
+ * as a value keeps the one place that decides it findable, and turns "refresh
+ * every so often" back on by editing a number. An org avatar changes about once
+ * a year; the Settings panel refreshes one project on demand for that day.
+ */
+export const AVATAR_REFRESH_MS = Number.POSITIVE_INFINITY;
 
 /** Wait after the first failure; each further failure doubles it. */
 export const AVATAR_BACKOFF_BASE_MS = 5 * 60 * 1000;
@@ -187,5 +194,10 @@ export function shouldRefetch(row: AvatarRefetchState, now: number): boolean {
 
   if (row.remoteImage === null) return true;
   if (row.fetchedAt === null) return true;
+
+  // A picture that already arrived is never asked for again. An org avatar
+  // changes about once a year, and a sweep that re-asks on a timer spends the
+  // user's traffic — on someone else's server — for a change nobody is waiting
+  // on. The Settings panel has a per-project refresh for the day it does change.
   return now - row.fetchedAt >= AVATAR_REFRESH_MS;
 }

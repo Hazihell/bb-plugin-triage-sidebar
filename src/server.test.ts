@@ -554,15 +554,14 @@ describe("remote avatar sweep", () => {
     stubFetch(() => imageResponse());
     await host.harness.behavior.runSchedule("project-avatars");
 
-    // Age the cache past its refresh window so the next sweep tries again.
-    host.bb.storage
-      .database()
-      .prepare(`UPDATE project_avatar SET fetched_at = ? WHERE project_id = ?`)
-      .run(Date.now() - 30 * DAY_MS, "prj_1");
+    // The sweep never re-asks for an image it already has, so the second
+    // attempt is the one the user asks for from the Settings panel.
     stubFetch(() => {
       throw new Error("connection refused");
     });
-    await host.harness.behavior.runSchedule("project-avatars");
+    await host.harness.behavior.callRpc("refreshProjectAvatar", {
+      projectId: "prj_1",
+    });
 
     const [row] = await listAvatars(host);
     expect(row?.remoteImage).toMatch(/^data:image\/png;base64,/);
