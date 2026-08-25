@@ -220,6 +220,50 @@ describe("resolveProjectAvatar", () => {
     ).toEqual({ kind: "image", src: "https://host/org.png" });
   });
 
+  // A favicon is the project's own mark; a host avatar belongs to the org
+  // that owns it, so without this every repository under one organization
+  // would wear the same face.
+  it("prefers the project's own favicon over the git host's image", () => {
+    expect(
+      resolveProjectAvatar(PROJECT, {
+        faviconImage: "data:image/svg+xml;base64,AAA",
+        remoteImage: "https://host/org.png",
+      }),
+    ).toEqual({ kind: "image", src: "data:image/svg+xml;base64,AAA" });
+  });
+
+  it("prefers a custom image over the favicon", () => {
+    expect(
+      resolveProjectAvatar(PROJECT, {
+        customKind: "image",
+        customImage: "data:image/png;base64,AAA",
+        faviconImage: "data:image/svg+xml;base64,BBB",
+      }),
+    ).toEqual({ kind: "image", src: "data:image/png;base64,AAA" });
+  });
+
+  // The favicon is re-read in the background. If it could override a chosen
+  // monogram, the user's choice would undo itself on the next scan.
+  it("keeps a chosen monogram even when a favicon was found", () => {
+    expect(
+      resolveProjectAvatar(PROJECT, {
+        customKind: "monogram",
+        faviconImage: "data:image/svg+xml;base64,AAA",
+      }),
+    ).toMatchObject({ kind: "monogram", initials: "C" });
+  });
+
+  // A project whose checkout is not on this machine has no favicon, and must
+  // fall the rest of the way down rather than render nothing.
+  it("falls back to the remote image when there is no favicon", () => {
+    expect(
+      resolveProjectAvatar(PROJECT, {
+        faviconImage: null,
+        remoteImage: "https://host/org.png",
+      }),
+    ).toEqual({ kind: "image", src: "https://host/org.png" });
+  });
+
   it("prefers a custom image over the remote one", () => {
     expect(
       resolveProjectAvatar(PROJECT, {

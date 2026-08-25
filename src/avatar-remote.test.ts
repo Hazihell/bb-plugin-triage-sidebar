@@ -87,6 +87,7 @@ const NOW = 1_700_000_000_000;
 const state = (overrides: Partial<AvatarRefetchState>): AvatarRefetchState => ({
   customKind: null,
   customImage: null,
+  faviconImage: null,
   remoteImage: null,
   remoteUrl: null,
   fetchedAt: null,
@@ -126,6 +127,19 @@ describe("shouldRefetch", () => {
     ).toBe(false);
   });
 
+  // The project's own favicon is drawn instead of the host's image, so the
+  // request would be for a picture nobody sees.
+  it("never fetches for a project with a local favicon", () => {
+    expect(
+      shouldRefetch(
+        state({ faviconImage: "data:image/svg+xml;base64,AA" }),
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  // The favicon outranks the host's image but not the user's own choice of a
+  // monogram, and a monogram does not stop the cache being kept warm.
   it("still fetches behind a custom colour or emoji", () => {
     expect(
       shouldRefetch(state({ customKind: "color" }), NOW),

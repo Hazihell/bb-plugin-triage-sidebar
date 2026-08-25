@@ -7,9 +7,16 @@
  * id rather than the name — a rename must not repaint the sidebar, because the
  * user has already learned "the teal one is work".
  *
- * Three sources, in order: an avatar the user set by hand, an image cached
- * from the git remote host (the GitHub org's logo, say), and a generated
- * monogram. The order is intent first, then the world's opinion, then ours.
+ * Four sources, in order: an avatar the user set by hand, the icon this
+ * project ships in its own checkout, an image cached from the git remote host
+ * (the GitHub org's logo, say), and a generated monogram. The order is intent
+ * first, then the project's own answer, then the world's, then ours.
+ *
+ * The favicon sits above the host's image because the two identify different
+ * things. A favicon is the project's own mark; a host avatar belongs to the
+ * ORG that owns the repository, so every project under one organization would
+ * otherwise wear the same face — which is precisely what this chip exists to
+ * prevent.
  */
 
 /**
@@ -34,6 +41,17 @@ export type StoredProjectAvatar = {
   customEmoji?: string | null;
   /** A user-supplied image: a data URL, or a URL bb can load. */
   customImage?: string | null;
+  /**
+   * An icon read out of the project's own folder on this machine — its
+   * favicon — cached by this plugin.
+   */
+  faviconImage?: string | null;
+  /**
+   * Where that icon came from, relative to the project root. Kept for the
+   * user, not for the renderer: when the wrong icon appears, the path is the
+   * only thing that explains why, and the only thing they can act on.
+   */
+  faviconPath?: string | null;
   /** An image fetched from the git remote host and cached by this plugin. */
   remoteImage?: string | null;
 };
@@ -235,7 +253,8 @@ export function projectMonogram(
 }
 
 /**
- * User intent, then the remote's image, then a monogram.
+ * User intent, then the project's own icon, then the remote's image, then a
+ * monogram.
  *
  * A user who set a monogram gets a monogram even when a remote image is
  * cached: the remote is a convenience, and the moment someone overrides it the
@@ -277,6 +296,9 @@ export function resolveProjectAvatar(
       };
     }
   }
+
+  const faviconImage = present(stored?.faviconImage);
+  if (faviconImage) return { kind: "image", src: faviconImage };
 
   const remoteImage = present(stored?.remoteImage);
   if (remoteImage) return { kind: "image", src: remoteImage };

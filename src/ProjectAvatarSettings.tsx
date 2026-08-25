@@ -76,7 +76,15 @@ export function ProjectAvatarSettings() {
   );
 }
 
-/** What the user is currently getting, said in words next to the Clear button. */
+/**
+ * What the user is currently getting, said in words next to the Clear button.
+ *
+ * The favicon case names the file, where the others name only the source. It
+ * is the one case where the answer can be surprising — a project can ship an
+ * icon nobody remembers putting there, or its framework's untouched default —
+ * and the path is both the explanation and the thing the user can go and
+ * change.
+ */
 function describeSource(stored: StoredProjectAvatar | undefined): string {
   switch (stored?.customKind) {
     case "monogram":
@@ -86,6 +94,11 @@ function describeSource(stored: StoredProjectAvatar | undefined): string {
     case "image":
       return "Your image";
     default:
+      if (stored?.faviconImage) {
+        return stored.faviconPath
+          ? `Project folder: ${stored.faviconPath}`
+          : "From the project folder";
+      }
       return stored?.remoteImage ? "From the git host" : "Generated";
   }
 }
@@ -142,7 +155,14 @@ function ProjectAvatarRow({
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {project.name}
         </span>
-        <span className="shrink-0 text-2xs text-muted-foreground">
+        {/* Truncated rather than fixed-width: a favicon's path can be as long
+            as `apps/web/public/apple-touch-icon.png`, and the project's name
+            is the more important of the two things competing for this line.
+            The title carries the whole path for the one moment it matters. */}
+        <span
+          title={describeSource(stored)}
+          className="max-w-48 shrink-0 truncate text-2xs text-muted-foreground"
+        >
           {describeSource(stored)}
         </span>
         <RowButton

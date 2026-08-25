@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -7,6 +10,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import plugin, {
   isAllowedAvatarDataUrl,
+  localSourcePath,
   MAX_AVATAR_BYTES,
   parseAutoArchiveDays,
   type StoredAvatarRow,
@@ -268,11 +272,20 @@ const imageResponse = (
     headers: { "content-type": contentType },
   });
 
+/** The host id `system.config` reports for the machine running the server. */
+const OWN_HOST = "hst_this_machine";
+
 /** A host with one project, its git remote pointing at GitHub. */
 function loadWithProject(
   options: {
     gitRemoteUrl?: string | null;
     settings?: CreateFakePluginHostOptions["settings"];
+    /** A checkout on this machine, when the test is about the local scan. */
+    sourcePath?: string;
+    /** The machine the source is enrolled on; defaults to this one. */
+    sourceHostId?: string;
+    /** What `system.config` answers, for the cases where it cannot say. */
+    primaryHostId?: string | null;
   } = {},
 ): FakePluginHost {
   const project = {
@@ -281,6 +294,19 @@ function loadWithProject(
       options.gitRemoteUrl === undefined
         ? "git@github.com:get-bb/bb.git"
         : options.gitRemoteUrl,
+    sources:
+      options.sourcePath === undefined
+        ? []
+        : [
+            {
+              id: "src_1",
+              projectId: "prj_1",
+              isDefault: true,
+              type: "local_path",
+              hostId: options.sourceHostId ?? OWN_HOST,
+              path: options.sourcePath,
+            },
+          ],
   };
   return load({
     settings: options.settings,
@@ -288,6 +314,14 @@ function loadWithProject(
       projects: {
         list: () => [project],
         get: () => project,
+      },
+      system: {
+        config: () => ({
+          primaryHostId:
+            options.primaryHostId === undefined
+              ? OWN_HOST
+              : options.primaryHostId,
+        }),
       },
     },
   });
@@ -467,6 +501,18 @@ describe("remote avatar sweep", () => {
     await host.harness.behavior.runSchedule("project-avatars");
 
     expect(fake).not.toHaveBeenCalled();
+    expect(await listAvatars(host)).toEqual([]);
+  });
+
+  // With both halves off there is nothing left for the sweep to decide, so it
+  // does not even ask bb what the projects are.
+  it("reads nothing at all when both avatar sources are off", async () => {
+    const host = loadWithProject({
+      settings: { remoteAvatarsEnabled: false, localFaviconsEnabled: false },
+    });
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
     expect(host.harness.inspection.sdk.callsTo("projects.list")).toEqual([]);
   });
 
@@ -619,5 +665,383 @@ describe("refreshProjectAvatar", () => {
       }),
     ).toEqual({ ok: false });
     expect(fake).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A real directory tree rather than a mocked `fs`.
+ *
+ * The scan is about what a filesystem actually answers — a missing directory,
+ * a file that is really a directory, an mtime that moved — and a mock of `fs`
+ * would only ever return what this test already believed. A temp directory
+ * costs a few milliseconds and tests the thing that ships.
+ */
+const checkouts: string[] = [];
+
+async function makeCheckout(
+  files: Record<string, string | Buffer>,
+): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "triage-favicon-"));
+  checkouts.push(root);
+  for (const [relative, contents] of Object.entries(files)) {
+    const absolute = join(root, relative);
+    await mkdir(dirname(absolute), { recursive: true });
+    await writeFile(absolute, contents);
+  }
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    checkouts.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>';
+
+const dataUrlOf = (mimeType: string, contents: string | Buffer): string =>
+  `data:${mimeType};base64,${Buffer.from(contents).toString("base64")}`;
+
+describe("localSourcePath", () => {
+  const source = (overrides: Record<string, unknown> = {}) => ({
+    type: "local_path",
+    hostId: OWN_HOST,
+    path: "/checkouts/app",
+    isDefault: true,
+    ...overrides,
+  });
+
+  it("takes the default source on this machine", () => {
+    expect(
+      localSourcePath(
+        {
+          id: "prj_1",
+          gitRemoteUrl: null,
+          sources: [
+            source({ path: "/checkouts/extra", isDefault: false }),
+            source({ path: "/checkouts/main" }),
+          ],
+        },
+        OWN_HOST,
+      ),
+    ).toBe("/checkouts/main");
+  });
+
+  // The path describes a directory on the OTHER machine. That the same path
+  // may exist here is a coincidence, not permission to open it.
+  it("refuses a source enrolled on another machine", () => {
+    expect(
+      localSourcePath(
+        {
+          id: "prj_1",
+          gitRemoteUrl: null,
+          sources: [source({ hostId: "hst_someone_elses_laptop" })],
+        },
+        OWN_HOST,
+      ),
+    ).toBe(null);
+  });
+
+  it("refuses everything when the server cannot name its own machine", () => {
+    expect(
+      localSourcePath(
+        { id: "prj_1", gitRemoteUrl: null, sources: [source()] },
+        null,
+      ),
+    ).toBe(null);
+  });
+
+  it("has nothing to read for a project with no sources", () => {
+    expect(
+      localSourcePath({ id: "prj_1", gitRemoteUrl: null }, OWN_HOST),
+    ).toBe(null);
+    expect(
+      localSourcePath(
+        { id: "prj_1", gitRemoteUrl: null, sources: [source({ path: "  " })] },
+        OWN_HOST,
+      ),
+    ).toBe(null);
+  });
+});
+
+describe("local favicon scan", () => {
+  it("reads the project's own icon and records where it came from", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row).toMatchObject({
+      faviconImage: dataUrlOf("image/svg+xml", SVG),
+      faviconPath: "public/favicon.svg",
+      faviconMissingAt: null,
+    });
+    expect(row?.faviconScannedAt).toBeGreaterThan(0);
+  });
+
+  // The favicon is what the sidebar draws, so asking the git host for an
+  // image nobody will see is noise on somebody else's server.
+  it("stops fetching from the git host once a favicon is found", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    const fake = stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect(fake).not.toHaveBeenCalled();
+  });
+
+  it("still fetches from the git host when the checkout has no icon", async () => {
+    const root = await makeCheckout({ "README.md": "# hi" });
+    const host = loadWithProject({ sourcePath: root });
+    const fake = stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect(fake).toHaveBeenCalledTimes(1);
+    const [row] = await listAvatars(host);
+    expect(row?.faviconImage).toBeNull();
+    // The memo that stops the next load walking these directories again.
+    expect(row?.faviconMissingAt).toBeGreaterThan(0);
+  });
+
+  it("takes the best candidate the checkout offers", async () => {
+    const root = await makeCheckout({
+      "public/favicon.ico": "not really an icon",
+      "public/favicon-32x32.png": PNG_BYTES,
+      "public/apple-touch-icon.png": PNG_BYTES,
+      "src/logo.svg": SVG,
+    });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconPath).toBe("public/apple-touch-icon.png");
+  });
+
+  // A repository whose only icon is favicon.ico is extremely common, so the
+  // store accepts icon files even though they are usually 16 or 32 pixels.
+  it("uses favicon.ico when it is the only icon", async () => {
+    const root = await makeCheckout({ "public/favicon.ico": "icon bytes" });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconPath).toBe("public/favicon.ico");
+    expect(row?.faviconImage).toContain("data:image/x-icon;base64,");
+  });
+
+  // The best-ranked name can turn out to be unreadable — a directory here —
+  // so the scan must fall through instead of giving up on the project.
+  it("falls through a candidate it cannot read", async () => {
+    const root = await makeCheckout({
+      "public/apple-touch-icon.png/keep": "a directory, not a file",
+      "public/logo.svg": SVG,
+    });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconPath).toBe("public/logo.svg");
+  });
+
+  it("refuses an icon past the size cap", async () => {
+    const root = await makeCheckout({
+      "public/favicon.png": Buffer.alloc(MAX_AVATAR_BYTES + 1),
+    });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconImage).toBeNull();
+  });
+
+  it("finds an icon one level down in a monorepo", async () => {
+    const root = await makeCheckout({ "apps/web/public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconPath).toBe("apps/web/public/favicon.svg");
+  });
+
+  it("does not walk a directory it was never told to search", async () => {
+    const root = await makeCheckout({
+      "node_modules/thing/favicon.svg": SVG,
+      "docs/favicon.svg": SVG,
+    });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconImage).toBeNull();
+  });
+
+  // The sweep runs against every project every day; re-reading an unchanged
+  // image would be the most expensive thing this plugin does.
+  it("does not re-read an unchanged icon, and re-reads a changed one", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+    const first = (await listAvatars(host))[0];
+
+    await host.harness.behavior.runSchedule("project-avatars");
+    expect((await listAvatars(host))[0]?.faviconScannedAt).toBe(
+      first?.faviconScannedAt,
+    );
+
+    const changed = SVG.replace("rect", "circle");
+    await writeFile(join(root, "public/favicon.svg"), changed);
+    // Explicit mtime rather than trusting the clock: two writes inside the
+    // same millisecond are entirely possible on a fast machine.
+    const later = new Date(Date.now() + 60_000);
+    await utimes(join(root, "public/favicon.svg"), later, later);
+
+    await host.harness.behavior.runSchedule("project-avatars");
+    expect((await listAvatars(host))[0]?.faviconImage).toBe(
+      dataUrlOf("image/svg+xml", changed),
+    );
+  });
+
+  it("forgets an icon that was deleted", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    await rm(join(root, "public/favicon.svg"));
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconImage).toBeNull();
+    expect(row?.faviconPath).toBeNull();
+  });
+
+  // Once a project has been found to have no icon, the next scan is skipped
+  // for half a day — long enough that a plugin reload is free, short enough
+  // that the daily sweep always looks again.
+  it("waits before walking an iconless project's directories again", async () => {
+    const root = await makeCheckout({ "README.md": "# hi" });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    await writeFile(join(root, "favicon.svg"), SVG);
+    await host.harness.behavior.runSchedule("project-avatars");
+    expect((await listAvatars(host))[0]?.faviconImage).toBeNull();
+
+    // A day later — which is when the daily schedule next runs anyway.
+    host.bb.storage
+      .database()
+      .prepare(
+        `UPDATE project_avatar SET favicon_missing_at = ? WHERE project_id = ?`,
+      )
+      .run(Date.now() - DAY_MS, "prj_1");
+    await host.harness.behavior.runSchedule("project-avatars");
+    expect((await listAvatars(host))[0]?.faviconPath).toBe("favicon.svg");
+  });
+
+  it("reads nothing while the setting is off", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({
+      sourcePath: root,
+      settings: { localFaviconsEnabled: false },
+    });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    const [row] = await listAvatars(host);
+    expect(row?.faviconImage).toBeNull();
+    expect(row?.faviconScannedAt).toBeNull();
+    // With no favicon in the way, the git host is asked as it always was.
+    expect(row?.remoteImage).toMatch(/^data:image\/png;base64,/);
+  });
+
+  // The path names a directory on the other machine; the fact that it also
+  // exists here is a coincidence.
+  it("reads nothing for a checkout on another machine", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({
+      sourcePath: root,
+      sourceHostId: "hst_someone_elses_laptop",
+    });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect((await listAvatars(host))[0]?.faviconImage).toBeNull();
+  });
+
+  it("reads nothing when the server cannot name its own machine", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root, primaryHostId: null });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect((await listAvatars(host))[0]?.faviconImage).toBeNull();
+  });
+
+  // A folder on an unmounted disk costs that project an icon, never the sweep.
+  it("survives a source folder that is not there", async () => {
+    const host = loadWithProject({ sourcePath: "/definitely/not/here" });
+    const fake = stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect(fake).toHaveBeenCalledTimes(1);
+    expect((await listAvatars(host))[0]?.remoteImage).toMatch(/^data:image/);
+  });
+
+  // The user is looking at the sidebar when they flip the switch; an avatar
+  // that stayed until the next sweep would read as the setting doing nothing.
+  it("forgets the icons it read when the setting is turned off", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+    await host.harness.behavior.runSchedule("project-avatars");
+    expect((await listAvatars(host))[0]?.faviconImage).not.toBeNull();
+
+    await host.harness.behavior.setSettings({ localFaviconsEnabled: false });
+
+    // Nothing custom, nothing fetched and nothing local: the row has nothing
+    // left to say, exactly as it would have had the scan never run.
+    expect(await listAvatars(host)).toEqual([]);
+    expect(
+      host.harness.inspection.realtimeSignals.some(
+        (signal) => signal.channel === "project-avatars",
+      ),
+    ).toBe(true);
+  });
+
+  // Every sweep touches every project; a signal per project per sweep would
+  // re-render every sidebar in every window for nothing.
+  it("tells the frontend only when the icon actually changed", async () => {
+    const root = await makeCheckout({ "public/favicon.svg": SVG });
+    const host = loadWithProject({ sourcePath: root });
+    stubFetch(() => imageResponse());
+
+    await host.harness.behavior.runSchedule("project-avatars");
+    const after = host.harness.inspection.realtimeSignals.length;
+    await host.harness.behavior.runSchedule("project-avatars");
+
+    expect(host.harness.inspection.realtimeSignals.length).toBe(after);
   });
 });

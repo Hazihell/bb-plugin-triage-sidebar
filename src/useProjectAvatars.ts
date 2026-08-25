@@ -15,7 +15,10 @@ export interface ProjectAvatarsApi {
   rows: ReadonlyMap<string, StoredAvatarRow>;
   /** Record the user's choice. Rejects with the backend's message. */
   set(projectId: string, custom: CustomProjectAvatar): Promise<void>;
-  /** Drop the choice and fall back to the remote image, then the monogram. */
+  /**
+   * Drop the choice and fall back to the project's own icon, then the remote
+   * image, then the monogram.
+   */
   clear(projectId: string): Promise<void>;
   /**
    * Ask the git host again for one project, now, ignoring the backoff.

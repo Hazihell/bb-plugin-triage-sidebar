@@ -29,6 +29,11 @@ function row(overrides: Partial<StoredAvatarRow> = {}): StoredAvatarRow {
     customInitials: null,
     customEmoji: null,
     customImage: null,
+    faviconImage: null,
+    faviconPath: null,
+    faviconMtime: null,
+    faviconScannedAt: null,
+    faviconMissingAt: null,
     remoteImage: null,
     remoteUrl: null,
     fetchedAt: null,
@@ -114,6 +119,30 @@ describe("ProjectAvatarSettings", () => {
       ).toBeDefined(),
     );
     expect(within(projectRow("captouro")).getByText("Generated")).toBeDefined();
+  });
+
+  // The path is the only thing that explains a wrong icon, and the only thing
+  // the user can go and change.
+  it("names the file a project's own icon came from", async () => {
+    render({
+      rows: [
+        row({
+          faviconImage: "data:image/svg+xml;base64,AA",
+          faviconPath: "apps/web/public/favicon.svg",
+          // A cached host image is still in the row; the favicon outranks it,
+          // and the caption has to say which one is actually being drawn.
+          remoteImage: "data:image/png;base64,AA",
+        }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(
+        within(projectRow("my cool app")).getByText(
+          "Project folder: apps/web/public/favicon.svg",
+        ),
+      ).toBeDefined(),
+    );
   });
 
   it("stores the typed initials on the chosen preset hue", async () => {

@@ -132,6 +132,8 @@ export function remoteAvatarUrl(gitRemoteUrl: string | null): string | null {
 export interface AvatarRefetchState {
   customKind: string | null;
   customImage: string | null;
+  /** The icon read out of the project's own checkout, if it has one. */
+  faviconImage: string | null;
   remoteImage: string | null;
   remoteUrl: string | null;
   fetchedAt: number | null;
@@ -154,15 +156,22 @@ export function backoffDelayMs(failureCount: number): number {
 /**
  * Whether the sweep should go and ask the host for this project's avatar.
  *
- * The order of the checks is the point. A user's own image outranks
- * everything, because fetching for a project whose avatar will never be shown
- * is pure noise on someone else's server. A changed remote outranks the
- * backoff, because the previous failures were about a different host and
- * holding the new one to them would leave a project blank for a day.
+ * The order of the checks is the point. Anything that already outranks the
+ * host's image comes first, because fetching for a project whose avatar will
+ * never be shown is pure noise on someone else's server. A changed remote
+ * outranks the backoff, because the previous failures were about a different
+ * host and holding the new one to them would leave a project blank for a day.
  */
 export function shouldRefetch(row: AvatarRefetchState, now: number): boolean {
   // The user set a picture; the remote one would never be rendered.
   if (row.customKind === "image" && row.customImage !== null) return false;
+
+  // Same reasoning, one rank down: the project's own favicon is drawn instead
+  // of the host's image, so this is a request for a picture nobody sees. This
+  // lives here rather than beside the call because "is the fetch worth making"
+  // is one question, and splitting it across two gates is how the two answers
+  // start to disagree.
+  if (row.faviconImage !== null) return false;
 
   if (row.desiredUrl === null) return false;
 
