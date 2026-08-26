@@ -28,11 +28,8 @@ export function ThreadCard({
   projectName,
   projectAvatar,
   isActive,
-  canPark,
   park,
   onNavigate,
-  onSettle,
-  onSnooze,
   startedWorkingAt,
   now,
 }: {
@@ -41,13 +38,13 @@ export function ThreadCard({
   /** This project's stored avatar, or undefined for a generated monogram. */
   projectAvatar?: StoredProjectAvatar;
   isActive: boolean;
-  /** False while the thread is working or blocked on the user. */
-  canPark: boolean;
-  /** The same parking, offered from the right-click / long-press menu. */
+  /**
+   * Parking, for both surfaces that offer it: the hover buttons below and the
+   * right-click / long-press menu. One bundle rather than loose handlers, so
+   * the two can never be handed a different answer for the same thread.
+   */
   park: ParkMenuActions;
   onNavigate: () => void;
-  onSettle: () => void;
-  onSnooze: (snoozedUntil: number) => void;
   /**
    * When bb recorded this thread's current run starting, or null when it is
    * not running. Only a working row spends it, as an elapsed label beside the
@@ -108,26 +105,28 @@ export function ThreadCard({
             </span>
             {/* Status at rest, park actions on hover. Only the status yields,
                 so the project name never shifts. */}
-            {canPark ? (
+            {park.canPark ? (
               <span className="pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex">
                 <ParkButton
                   label="Snooze until tomorrow"
                   icon="Clock"
                   onActivate={() =>
-                    onSnooze(resolveSnoozePresets(new Date())[2]!.snoozedUntil)
+                    park.onSnooze(
+                      resolveSnoozePresets(new Date())[2]!.snoozedUntil,
+                    )
                   }
                 />
                 <ParkButton
                   label="Settle thread"
                   icon="Check"
-                  onActivate={onSettle}
+                  onActivate={park.onSettle}
                 />
               </span>
             ) : null}
             <span
               className={cn(
                 STATUS_SLOT_CLASS,
-                canPark && "group-hover/card:hidden",
+                park.canPark && "group-hover/card:hidden",
               )}
             >
               <StatusOrTime

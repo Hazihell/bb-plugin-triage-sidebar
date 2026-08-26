@@ -8,16 +8,6 @@
  * testable without a socket, a clock, or a database.
  */
 
-/**
- * How long a successful cache stays fresh — forever, on purpose.
- *
- * Infinity rather than a deleted branch: the expiry is a policy, and writing it
- * as a value keeps the one place that decides it findable, and turns "refresh
- * every so often" back on by editing a number. An org avatar changes about once
- * a year; the Settings panel refreshes one project on demand for that day.
- */
-export const AVATAR_REFRESH_MS = Number.POSITIVE_INFINITY;
-
 /** Wait after the first failure; each further failure doubles it. */
 export const AVATAR_BACKOFF_BASE_MS = 5 * 60 * 1000;
 
@@ -29,14 +19,22 @@ export const AVATAR_BACKOFF_BASE_MS = 5 * 60 * 1000;
 export const AVATAR_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Hosts we never ask.
+ * Hosts this plugin never fetches from.
  *
- * A loopback or bare-IP remote is somebody's own machine or a box on their
- * LAN. It will not be serving `/<owner>.png`, and pointing an outbound fetch
- * at an internal address is the kind of request a plugin should not make on
- * its own initiative. The monogram is the right answer for these.
+ * A loopback or bare-IP host is somebody's own machine or a box on their LAN.
+ * Two callers share this one refusal, so neither can quietly relax it: the
+ * git-remote guess must not point an unprompted outbound fetch at an internal
+ * address, and a URL the user pastes must not turn a button in Settings into a
+ * probe of their own network from inside bb. For the first the monogram is the
+ * right answer; for the second an error is.
+ *
+ * Every IP literal is refused, not only the reserved ranges. `new URL`
+ * normalizes the alternative v4 spellings — `127.1`, `0x7f.1`, `2130706433`
+ * all arrive here as `127.0.0.1` — so the dotted-quad test is not the hole it
+ * looks like; and a host reachable only by address is rare enough that
+ * refusing the public ones too costs nothing worth the extra rules.
  */
-function isPrivateHostname(hostname: string): boolean {
+export function isPrivateAvatarHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   // IPv6 arrives from URL as `::1`; from a scp-style remote it cannot appear
@@ -117,7 +115,7 @@ export function remoteAvatarUrl(gitRemoteUrl: string | null): string | null {
   if (gitRemoteUrl === null) return null;
   const parsed = parseRemote(gitRemoteUrl);
   if (parsed === null) return null;
-  if (isPrivateHostname(parsed.hostname)) return null;
+  if (isPrivateAvatarHost(parsed.hostname)) return null;
 
   if (parsed.host === "github.com" || parsed.host === "www.github.com") {
     return `https://github.com/${parsed.owner}.png?size=128`;
@@ -195,9 +193,47 @@ export function shouldRefetch(row: AvatarRefetchState, now: number): boolean {
   if (row.remoteImage === null) return true;
   if (row.fetchedAt === null) return true;
 
-  // A picture that already arrived is never asked for again. An org avatar
-  // changes about once a year, and a sweep that re-asks on a timer spends the
-  // user's traffic — on someone else's server — for a change nobody is waiting
-  // on. The Settings panel has a per-project refresh for the day it does change.
-  return now - row.fetchedAt >= AVATAR_REFRESH_MS;
+  // A picture that already arrived is never asked for again, however old it
+  // is. An org avatar changes about once a year, and a sweep that re-asks on a
+  // timer spends the user's traffic — on someone else's server — for a change
+  // nobody is waiting on. The Settings panel has a per-project refresh for the
+  // day it does change.
+  return false;
+}
+
+/**
+ * Why a pasted avatar URL was refused, for a caller that has to word it.
+ *
+ * Three reasons rather than one boolean, because each asks the user for a
+ * different fix and a single "bad URL" would leave them guessing which.
+ */
+export type UserAvatarUrlRefusal = "unparseable" | "scheme" | "private-host";
+
+export type UserAvatarUrlCheck =
+  | { ok: true; url: string }
+  | { ok: false; reason: UserAvatarUrlRefusal };
+
+/**
+ * Whether a URL the user typed is one the server will go and fetch.
+ *
+ * Unlike {@link remoteAvatarUrl} this keeps the scheme it was given: the user
+ * named this host, so an `http://` intranet forge they chose is their call to
+ * make. Everything that is not http or https is refused outright — `file:`
+ * would read this machine's disk and `data:` would smuggle the image past the
+ * fetch routine's checks, and neither is a thing a URL field should do.
+ */
+export function checkUserAvatarUrl(raw: string): UserAvatarUrlCheck {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return { ok: false, reason: "unparseable" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, reason: "scheme" };
+  }
+  if (url.hostname === "" || isPrivateAvatarHost(url.hostname)) {
+    return { ok: false, reason: "private-host" };
+  }
+  return { ok: true, url: url.toString() };
 }

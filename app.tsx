@@ -48,7 +48,7 @@ export default definePluginApp((app) => {
     id: "project-avatars",
     title: "Project avatars",
     description:
-      "One square per project, so the eye can group the list before it reads it. Set one yourself, or leave it to the git host's image and a generated monogram.",
+      "One square per project, so the eye can group the list before it reads it. Set one yourself, or leave it to the project's own icon, the git host's image, and a generated monogram.",
     component: ProjectAvatarSettings,
   });
 });

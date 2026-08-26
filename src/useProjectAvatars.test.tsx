@@ -159,6 +159,22 @@ describe("useProjectAvatars", () => {
     });
   });
 
+  // The address goes to the backend, which downloads it there: a host that
+  // sends no permissive CORS header cannot be read from this window at all.
+  it("sends a pasted address for the backend to fetch", async () => {
+    const view = render({
+      listProjectAvatars: () => ({ rows: [] }),
+      setProjectAvatarFromUrl: () => ({ image: "data:image/png;base64,AQID" }),
+    });
+
+    await api.setFromUrl("prj_1", "https://example.org/logo.png");
+
+    expect(view.rpcCalls).toContainEqual({
+      method: "setProjectAvatarFromUrl",
+      input: { projectId: "prj_1", url: "https://example.org/logo.png" },
+    });
+  });
+
   // The caller asked for this fetch by hand, so it has to hear that the host
   // gave nothing rather than watch the avatar not change.
   it("reports whether a forced remote refresh found anything", async () => {

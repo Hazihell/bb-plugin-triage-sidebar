@@ -149,6 +149,23 @@ export function ThreadInbox({
     onUnsnooze: () => lifecycle.unsnooze(thread.id),
   });
 
+  // Pinned and Inbox are two shelves of the same card, not two kinds of row —
+  // their difference is entirely in the ordering above. One renderer keeps it
+  // that way: a card gains a prop in one place, and both shelves get it.
+  const renderCard = (thread: PluginSidebarThread) => (
+    <ThreadCard
+      key={thread.id}
+      thread={thread}
+      projectName={projectNameById.get(thread.projectId) ?? null}
+      projectAvatar={avatars.rows.get(thread.projectId)}
+      isActive={thread.id === activeThreadId}
+      park={parkFor(thread)}
+      onNavigate={onNavigate}
+      startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
+      now={now}
+    />
+  );
+
   const scopeLabel =
     scope === ALL_PROJECTS
       ? "All projects"
@@ -244,42 +261,12 @@ export function ThreadInbox({
           <>
             {pinned.length > 0 ? (
               <Shelf label="Pinned">
-                {pinned.map((thread) => (
-                  <ThreadCard
-                    key={thread.id}
-                    thread={thread}
-                    projectName={projectNameById.get(thread.projectId) ?? null}
-                    projectAvatar={avatars.rows.get(thread.projectId)}
-                    isActive={thread.id === activeThreadId}
-                    canPark={lifecycle.canPark(thread)}
-                    park={parkFor(thread)}
-                    onNavigate={onNavigate}
-                    onSettle={() => lifecycle.settle(thread.id)}
-                    onSnooze={(until) => lifecycle.snooze(thread.id, until)}
-                    startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
-                    now={now}
-                  />
-                ))}
+                {pinned.map(renderCard)}
               </Shelf>
             ) : null}
             {inbox.length > 0 ? (
               <Shelf label={pinned.length > 0 ? "Inbox" : null}>
-                {inbox.map((thread) => (
-                  <ThreadCard
-                    key={thread.id}
-                    thread={thread}
-                    projectName={projectNameById.get(thread.projectId) ?? null}
-                    projectAvatar={avatars.rows.get(thread.projectId)}
-                    isActive={thread.id === activeThreadId}
-                    canPark={lifecycle.canPark(thread)}
-                    park={parkFor(thread)}
-                    onNavigate={onNavigate}
-                    onSettle={() => lifecycle.settle(thread.id)}
-                    onSnooze={(until) => lifecycle.snooze(thread.id, until)}
-                    startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
-                    now={now}
-                  />
-                ))}
+                {inbox.map(renderCard)}
               </Shelf>
             ) : null}
             <ParkedShelf

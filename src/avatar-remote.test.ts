@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AVATAR_BACKOFF_BASE_MS,
   AVATAR_BACKOFF_MAX_MS,
-  AVATAR_REFRESH_MS,
   backoffDelayMs,
+  checkUserAvatarUrl,
   remoteAvatarUrl,
   shouldRefetch,
   type AvatarRefetchState,
@@ -159,17 +159,17 @@ describe("shouldRefetch", () => {
     ).toBe(false);
   });
 
-  it("refreshes a cache older than a week", () => {
+  it("never re-asks for a picture that already arrived, however old", () => {
     expect(
       shouldRefetch(
         state({
           remoteImage: "data:image/png;base64,AA",
           remoteUrl: "https://github.com/get-bb.png?size=128",
-          fetchedAt: NOW - AVATAR_REFRESH_MS - 1,
+          fetchedAt: NOW - 5 * 365 * 24 * 60 * 60 * 1000,
         }),
         NOW,
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("waits out the backoff after a failure, then tries again", () => {
@@ -217,5 +217,54 @@ describe("shouldRefetch", () => {
         NOW,
       ),
     ).toBe(true);
+  });
+});
+
+describe("checkUserAvatarUrl", () => {
+  it("accepts a public http or https address", () => {
+    expect(checkUserAvatarUrl("https://example.com/logo.png")).toEqual({
+      ok: true,
+      url: "https://example.com/logo.png",
+    });
+    // http stays http, unlike the git-remote guess: the user named this host.
+    expect(checkUserAvatarUrl(" http://forge.example/logo.png ")).toEqual({
+      ok: true,
+      url: "http://forge.example/logo.png",
+    });
+  });
+
+  it("refuses a scheme that is not the web", () => {
+    for (const raw of [
+      "file:///etc/passwd",
+      "data:image/png;base64,AAAA",
+      "ftp://example.com/logo.png",
+    ]) {
+      expect(checkUserAvatarUrl(raw)).toEqual({ ok: false, reason: "scheme" });
+    }
+  });
+
+  it("refuses an address only this machine or its network can reach", () => {
+    for (const raw of [
+      "http://localhost:3000/logo.png",
+      "http://127.0.0.1/logo.png",
+      // Alternative spellings of loopback, which `new URL` canonicalizes for us.
+      "http://127.1/logo.png",
+      "http://2130706433/logo.png",
+      "http://[::1]/logo.png",
+      "https://192.168.1.10/logo.png",
+      "https://10.0.0.4/logo.png",
+    ]) {
+      expect(checkUserAvatarUrl(raw)).toEqual({
+        ok: false,
+        reason: "private-host",
+      });
+    }
+  });
+
+  it("refuses something that is not an address at all", () => {
+    expect(checkUserAvatarUrl("not a url")).toEqual({
+      ok: false,
+      reason: "unparseable",
+    });
   });
 });

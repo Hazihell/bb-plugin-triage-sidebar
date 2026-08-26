@@ -27,11 +27,20 @@ import { cn } from "./lib/utils";
  *
  * Everywhere else this plugin uses Tailwind theme tokens only, because the
  * frontend's Tailwind pass emits default-theme utilities and a hardcoded color
- * breaks custom palettes. Identity colors are the exception — a hashed hue
- * cannot come from a token — so the background is applied via an inline
- * `style`, which bypasses Tailwind entirely. Everything else (radius, size,
- * font weight, layout) stays on Tailwind classes.
+ * breaks custom palettes. Identity colours are the exception — a hashed hue
+ * cannot come from a token — so they are applied via an inline `style`, which
+ * bypasses Tailwind entirely. Everything else (radius, size, font weight,
+ * layout) stays on Tailwind classes.
+ *
+ * The exception covers the PAIR, background and foreground together, and they
+ * are written in one `style` for that reason. `avatarBackground` picks its
+ * lightness so that white — this white, not the theme's — clears 4.5:1 on
+ * every hue; a foreground living somewhere else could be re-themed, purged or
+ * overridden on its own, and the first anyone would notice is a monogram
+ * nobody can read on teal. Kept side by side, neither can drift alone.
  */
+const AVATAR_FOREGROUND = "#fff";
+
 const SIZES = {
   /** 14px, the size of the status glyph, so both ends of a card line agree. */
   sm: "size-3.5 rounded-sm text-2xs",
@@ -68,7 +77,7 @@ export function ProjectAvatar({
 
   const box = cn(
     "flex shrink-0 items-center justify-center overflow-hidden",
-    "select-none font-semibold leading-none text-white",
+    "select-none font-semibold leading-none",
     SIZES[size],
     className,
   );
@@ -90,7 +99,7 @@ export function ProjectAvatar({
     <span
       aria-hidden="true"
       className={box}
-      style={{ background: avatar.background }}
+      style={{ background: avatar.background, color: AVATAR_FOREGROUND }}
     >
       {avatar.kind === "emoji" ? avatar.emoji : avatar.initials}
     </span>

@@ -81,6 +81,40 @@ export function resolveShelf(
   return "active";
 }
 
+/**
+ * What the backend's auto-archive sweep should do with a settled row.
+ *
+ * It exists so the sweep and the sidebar cannot hold different opinions about
+ * the same thread. The sweep used to select on an old `settled_at` alone and
+ * guard only with {@link canPark}, which asks what is happening right now — so
+ * a thread that spoke to the user after the settle, and that the sidebar had
+ * therefore already put back in the inbox, was still archived out from under
+ * them. Reading the answer out of {@link resolveShelf} instead means there is
+ * one rule and no second copy to keep in step with it.
+ */
+export type SettledSweepAction = "archive" | "skip" | "unsettle";
+
+export function resolveSettledSweepAction(
+  row: ThreadLifecycleRow,
+  signals: ThreadActivitySignals,
+  now: number,
+): SettledSweepAction {
+  switch (resolveShelf(row, signals, now)) {
+    case "settled":
+      return "archive";
+    // A wake time is a decision the user made after the settle; this sweep
+    // only ever finishes settles, so it is not this sweep's thread.
+    case "snoozed":
+      return "skip";
+    case "active":
+      // Live work or a raised hand is a moment, not a change of mind: the
+      // settle still stands, and the next sweep reconsiders once it is quiet.
+      // Anything else means the thread un-settled itself, and the row now
+      // describes a shelf it is not on.
+      return canPark(signals) ? "unsettle" : "skip";
+  }
+}
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;

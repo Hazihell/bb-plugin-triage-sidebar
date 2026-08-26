@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canPark,
   nextWakeDelayMs,
+  resolveSettledSweepAction,
   resolveShelf,
   resolveSnoozePresets,
   snoozeWakeLabel,
@@ -122,6 +123,54 @@ describe("resolveShelf", () => {
         1_000,
       ),
     ).toBe("snoozed");
+  });
+});
+
+describe("resolveSettledSweepAction", () => {
+  it("archives a settled thread nothing has touched", () => {
+    expect(resolveSettledSweepAction(row({ settledAt: 500 }), quiet, 1_000)).toBe(
+      "archive",
+    );
+  });
+
+  it("un-settles a thread that spoke after the settle", () => {
+    // The sidebar already shows this one in the inbox. Archiving it would take
+    // it off a shelf the user is looking at.
+    expect(
+      resolveSettledSweepAction(
+        row({ settledAt: 500 }),
+        { ...quiet, latestAttentionAt: 900 },
+        1_000,
+      ),
+    ).toBe("unsettle");
+  });
+
+  it("leaves a thread that is merely busy right now on its shelf", () => {
+    // Work is a moment, not a change of mind, so the settle survives it.
+    expect(
+      resolveSettledSweepAction(
+        row({ settledAt: 500 }),
+        { ...quiet, isWorking: true },
+        1_000,
+      ),
+    ).toBe("skip");
+    expect(
+      resolveSettledSweepAction(
+        row({ settledAt: 500 }),
+        { ...quiet, hasPendingInteraction: true },
+        1_000,
+      ),
+    ).toBe("skip");
+  });
+
+  it("does not touch a row that has been snoozed since", () => {
+    expect(
+      resolveSettledSweepAction(
+        row({ settledAt: 500, snoozedUntil: 5_000, snoozedAt: 900 }),
+        quiet,
+        1_000,
+      ),
+    ).toBe("skip");
   });
 });
 

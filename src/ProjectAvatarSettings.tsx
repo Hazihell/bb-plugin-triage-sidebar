@@ -291,10 +291,15 @@ function ProjectAvatarRow({
           disabled={isBusy || imageUrl.trim().length === 0}
           onClick={() =>
             void run(async () => {
-              await avatars.set(project.id, {
-                kind: "image",
-                image: await asStorableImage(imageUrl.trim()),
-              });
+              const value = imageUrl.trim();
+              // A data URL is already the thing the store keeps, so it is
+              // written straight through. Everything else is an address, and
+              // an address is fetched by the backend — see `setFromUrl`.
+              if (value.startsWith("data:")) {
+                await avatars.set(project.id, { kind: "image", image: value });
+              } else {
+                await avatars.setFromUrl(project.id, value);
+              }
               setImageUrl("");
               return null;
             })
@@ -313,53 +318,6 @@ function ProjectAvatarRow({
       )}
     </li>
   );
-}
-
-/**
- * A pasted address, turned into something the store will accept.
- *
- * The store keeps data URLs only, and that is not a limitation to work around:
- * a remote `<img src>` in the sidebar would ask a third-party server for the
- * same picture on every render of every card, and would leave the avatar blank
- * whenever that server is unreachable. So a link is downloaded once, here,
- * exactly as the background fetch does it for the git host — the difference is
- * only who chose the URL.
- *
- * The type and size are not checked here. The backend refuses anything it will
- * not render, in one sentence written for a person, and duplicating that rule
- * in the UI would give us two rules to keep in step.
- */
-async function asStorableImage(value: string): Promise<string> {
-  if (value.startsWith("data:")) return value;
-
-  let response: Response;
-  try {
-    response = await fetch(value);
-  } catch {
-    throw new Error("That address could not be reached.");
-  }
-  if (!response.ok) {
-    throw new Error(`That address answered ${response.status}.`);
-  }
-  const contentType = (response.headers.get("content-type") ?? "")
-    .split(";")[0]!
-    .trim()
-    .toLowerCase();
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  return `data:${contentType};base64,${base64(bytes)}`;
-}
-
-/**
- * Base64 without `FileReader` or Node's Buffer: one is asynchronous for no
- * reason here, the other does not exist in the app window. Chunked because
- * `String.fromCharCode(...bytes)` on a whole image overflows the call stack.
- */
-function base64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 8192) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
-  }
-  return btoa(binary);
 }
 
 const INPUT_CLASS =

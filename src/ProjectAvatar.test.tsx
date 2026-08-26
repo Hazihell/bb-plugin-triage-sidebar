@@ -27,9 +27,13 @@ describe("ProjectAvatar", () => {
     expect(style).toContain(avatarBackground(projectHue("proj_1")));
   });
 
-  it("keeps white text on the generated background", () => {
+  it("carries the white text in the same style as the background", () => {
     render(<ProjectAvatar project={PROJECT} />);
-    expect(screen.getByText("MC").className).toContain("text-white");
+    const monogram = screen.getByText("MC");
+    // Together, or the contrast guarantee is only half applied: the
+    // background's lightness was chosen so white clears 4.5:1 on every hue.
+    expect(monogram.style.color).toBe("rgb(255, 255, 255)");
+    expect(monogram.className).not.toContain("text-white");
   });
 
   it("draws a stored emoji instead of the monogram", () => {

@@ -16,6 +16,14 @@ export interface ProjectAvatarsApi {
   /** Record the user's choice. Rejects with the backend's message. */
   set(projectId: string, custom: CustomProjectAvatar): Promise<void>;
   /**
+   * Store an image the user named by address. The download happens on the
+   * server, not here: an image host that sends no permissive CORS header is
+   * perfectly readable in a browser tab and unreadable to `fetch` in this
+   * window, and the user cannot tell those two apart or do anything about it.
+   * Rejects with the backend's own sentence about the address or the image.
+   */
+  setFromUrl(projectId: string, url: string): Promise<void>;
+  /**
    * Drop the choice and fall back to the project's own icon, then the remote
    * image, then the monogram.
    */
@@ -91,6 +99,9 @@ export function useProjectAvatars(): ProjectAvatarsApi {
           projectId,
           custom: { kind: "clear" },
         });
+      },
+      setFromUrl: async (projectId, url) => {
+        await rpc.call("setProjectAvatarFromUrl", { projectId, url });
       },
       refresh: async (projectId) => {
         const result = await rpc.call("refreshProjectAvatar", { projectId });

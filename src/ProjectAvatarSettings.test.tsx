@@ -47,6 +47,7 @@ function render(
   options: {
     rows?: StoredAvatarRow[];
     setProjectAvatar?: () => { ok: boolean };
+    setProjectAvatarFromUrl?: () => { image: string };
     refreshProjectAvatar?: () => { ok: boolean };
     projects?: typeof PROJECTS;
   } = {},
@@ -63,6 +64,9 @@ function render(
       rpc: {
         listProjectAvatars: () => ({ rows: options.rows ?? [] }),
         setProjectAvatar: options.setProjectAvatar ?? (() => ({ ok: true })),
+        setProjectAvatarFromUrl:
+          options.setProjectAvatarFromUrl ??
+          (() => ({ image: "data:image/png;base64,AQID" })),
         refreshProjectAvatar:
           options.refreshProjectAvatar ?? (() => ({ ok: true })),
       } as never,
@@ -225,19 +229,13 @@ describe("ProjectAvatarSettings", () => {
     );
   });
 
-  // A remote `<img src>` would be fetched again on every render of every card
-  // and would go blank whenever that server is down, so a link is downloaded
-  // once here and stored the way the git host's own image is.
-  it("downloads a pasted link and stores it as a data URL", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(new Uint8Array([1, 2, 3]), {
-            headers: { "content-type": "image/png" },
-          }),
-      ),
-    );
+  // The download happens on the server, never in this window: an image host
+  // that sends no permissive CORS header is readable in a browser tab and
+  // invisible to `fetch` here, and the user can neither see that difference
+  // nor fix it.
+  it("hands a pasted link to the backend instead of fetching it", async () => {
+    const browserFetch = vi.fn();
+    vi.stubGlobal("fetch", browserFetch);
     const view = render();
     const target = projectRow("my cool app");
 
@@ -249,21 +247,22 @@ describe("ProjectAvatarSettings", () => {
 
     await waitFor(() =>
       expect(view.rpcCalls).toContainEqual({
-        method: "setProjectAvatar",
-        input: {
-          projectId: "prj_1",
-          custom: { kind: "image", image: "data:image/png;base64,AQID" },
-        },
+        method: "setProjectAvatarFromUrl",
+        input: { projectId: "prj_1", url: "https://example.org/logo.png" },
       }),
     );
+    expect(browserFetch).not.toHaveBeenCalled();
   });
 
-  it("explains an address it could not reach", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("", { status: 404 })),
+  it("shows the backend's own sentence about an address", async () => {
+    const target = (
+      render({
+        setProjectAvatarFromUrl: () => {
+          throw new Error("That address answered 404.");
+        },
+      }),
+      projectRow("my cool app")
     );
-    const target = (render(), projectRow("my cool app"));
 
     fireEvent.change(
       within(target).getByLabelText("Image URL for my cool app"),

@@ -219,6 +219,35 @@ describe("auto-archive sweep", () => {
     expect(await listRows(host)).toEqual([]);
   });
 
+  it("does not archive a thread that spoke to the user since the settle", async () => {
+    // The regression. The sidebar reads new attention after a settle as
+    // un-settling, so this thread is visibly back in the inbox — but nothing
+    // clears `settled_at`, and the sweep used to select on that column alone
+    // and guard only with "is it busy right now".
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) =>
+            makeThreadResponse({
+              id: threadId,
+              status: "idle",
+              latestAttentionAt: Date.now() - DAY_MS,
+            }),
+          interactions: { list: () => [] },
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_spoke");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
+    // And the stale row goes, so this is not a candidate the sweep has to talk
+    // itself out of again every hour.
+    expect(await listRows(host)).toEqual([]);
+  });
+
   it("honours a retention period the user set", async () => {
     const host = load({
       settings: { autoArchiveDays: "60" },
@@ -664,6 +693,92 @@ describe("refreshProjectAvatar", () => {
       }),
     ).toEqual({ ok: false });
     expect(fake).not.toHaveBeenCalled();
+  });
+});
+
+describe("setProjectAvatarFromUrl", () => {
+  it("fetches the picture here and stores it as the custom avatar", async () => {
+    const host = loadWithProject();
+    const fake = stubFetch(() => imageResponse());
+
+    const result = await host.harness.behavior.callRpc(
+      "setProjectAvatarFromUrl",
+      { projectId: "prj_1", url: "https://cdn.example.com/logo.png" },
+    );
+
+    expect(fake).toHaveBeenCalledTimes(1);
+    expect((result as { image: string }).image).toMatch(
+      /^data:image\/png;base64,/,
+    );
+    const [row] = await listAvatars(host);
+    // It lands in the custom column, not the remote cache: this is the user's
+    // choice, and the sweep must never overwrite or expire it.
+    expect(row?.customKind).toBe("image");
+    expect(row?.customImage).toMatch(/^data:image\/png;base64,/);
+    expect(row?.remoteImage).toBeNull();
+  });
+
+  it("still works while automatic git-host fetching is switched off", async () => {
+    // The switch is a promise about requests this plugin makes on its own
+    // initiative, not about a button the user just pressed.
+    const host = loadWithProject({ settings: { remoteAvatarsEnabled: false } });
+    const fake = stubFetch(() => imageResponse());
+
+    await host.harness.behavior.callRpc("setProjectAvatarFromUrl", {
+      projectId: "prj_1",
+      url: "https://cdn.example.com/logo.png",
+    });
+
+    expect(fake).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an address on this machine or its network, without asking", async () => {
+    const host = loadWithProject();
+    const fake = stubFetch(() => imageResponse());
+
+    for (const url of [
+      "http://localhost:8080/logo.png",
+      "http://127.0.0.1/logo.png",
+      "https://192.168.1.10/logo.png",
+      "file:///etc/passwd",
+    ]) {
+      await expect(
+        host.harness.behavior.callRpc("setProjectAvatarFromUrl", {
+          projectId: "prj_1",
+          url,
+        }),
+      ).rejects.toThrow();
+    }
+    expect(fake).not.toHaveBeenCalled();
+  });
+
+  it("refuses what the host sent when it is not an image the sidebar renders", async () => {
+    const host = loadWithProject();
+    stubFetch(() => new Response("<html>sign in</html>", {
+      headers: { "content-type": "text/html" },
+    }));
+
+    await expect(
+      host.harness.behavior.callRpc("setProjectAvatarFromUrl", {
+        projectId: "prj_1",
+        url: "https://forge.example.com/logo.png",
+      }),
+    ).rejects.toThrow(/text\/html/);
+    expect(await listAvatars(host)).toEqual([]);
+  });
+
+  it("refuses an image bigger than the sidebar will carry", async () => {
+    const host = loadWithProject();
+    stubFetch(() =>
+      imageResponse(Buffer.alloc(MAX_AVATAR_BYTES + 1, 0x41)),
+    );
+
+    await expect(
+      host.harness.behavior.callRpc("setProjectAvatarFromUrl", {
+        projectId: "prj_1",
+        url: "https://cdn.example.com/huge.png",
+      }),
+    ).rejects.toThrow();
   });
 });
 
