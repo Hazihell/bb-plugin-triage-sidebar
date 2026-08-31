@@ -161,7 +161,7 @@ header shows no parent chip.
 | `@radix-ui/react-context-menu` (shimmed)           | this plugin's own right-click menu, built on the action hook                                |
 | `settingsSection`                                  | the per-project avatar editor (the only place an avatar is set)                             |
 | `bb.settings.define`                               | auto-archive, and the switch behind each automatic avatar source                            |
-| `bb.background.schedule`                           | the hourly auto-archive pass and the avatar sweep                                           |
+| `bb.background.schedule`                           | the auto-archive pass (hourly ticker, user-set interval) and the avatar sweep                                           |
 | `bb.storage.database()` + `bb.rpc` + `bb.realtime` | the settled/snoozed store, and the project-avatar store behind it                            |
 
 The plugin API ships **no components**. Status glyphs and the right-click menu

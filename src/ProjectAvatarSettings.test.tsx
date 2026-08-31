@@ -14,7 +14,7 @@ import { avatarBackground } from "./project-avatar";
 // Loaded through the harness for the same reason the sidebar tests are: the
 // plugin's `@get-bb/plugin-sdk/app` import binds at module evaluation.
 const app = await loadPluginApp(() => import("../app"));
-const section = app.settingsSections[0]!;
+const section = app.settingsSections.find((s) => s.id === "project-avatars")!;
 
 const PROJECTS = [
   { id: "prj_1", name: "my cool app", isPersonal: false },
@@ -85,10 +85,14 @@ afterEach(() => {
 });
 
 describe("registration", () => {
-  it("is the plugin's one settings section", () => {
-    expect(app.settingsSections).toHaveLength(1);
-    expect(section.id).toBe("project-avatars");
+  it("is registered as a settings section of its own", () => {
     expect(section.title).toBe("Project avatars");
+    // Avatars and auto-archive are separate sections rather than one
+    // "Settings" pile: they share nothing but the page they land on.
+    expect(app.settingsSections.map((s) => s.id)).toEqual([
+      "project-avatars",
+      "auto-archive",
+    ]);
   });
 
   // Editing lives in Settings and nowhere else, so the sidebar's per-thread

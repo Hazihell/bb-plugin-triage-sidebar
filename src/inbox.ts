@@ -38,47 +38,6 @@ function attentionKey(thread: AttentionRanked): number {
     : thread.latestAttentionAt;
 }
 
-/**
- * Re-orders a freshly sorted list to match a snapshot of ids captured on an
- * earlier commit, which is how the list holds still while the pointer is over
- * it: a row must not slide out from under the cursor mid-click.
- *
- * A thread the snapshot never saw — it arrived while the list was frozen —
- * still appears, placed directly after whichever remembered thread precedes
- * it in the fresh sort. That is its natural position expressed in terms of
- * the neighbours the frozen list is actually showing, so a brand-new blocked
- * thread lands on top rather than being parked at the bottom until the
- * pointer leaves.
- */
-export function orderBySnapshot<T extends { readonly id: string }>(
-  sorted: readonly T[],
-  snapshot: ReadonlyMap<string, number>,
-): T[] {
-  // Arrivals keyed by the remembered thread they follow; null means "before
-  // every remembered thread", i.e. the head of the list.
-  const arrivals = new Map<string | null, T[]>();
-  const remembered: T[] = [];
-  let predecessor: string | null = null;
-  for (const thread of sorted) {
-    if (snapshot.has(thread.id)) {
-      remembered.push(thread);
-      predecessor = thread.id;
-      continue;
-    }
-    const bucket = arrivals.get(predecessor);
-    if (bucket) bucket.push(thread);
-    else arrivals.set(predecessor, [thread]);
-  }
-  remembered.sort(
-    (left, right) => snapshot.get(left.id)! - snapshot.get(right.id)!,
-  );
-  const ordered: T[] = [...(arrivals.get(null) ?? [])];
-  for (const thread of remembered) {
-    ordered.push(thread, ...(arrivals.get(thread.id) ?? []));
-  }
-  return ordered;
-}
-
 export function threadDisplayTitle(thread: PluginSidebarThread): string {
   const title = thread.title?.trim();
   if (title) return title;

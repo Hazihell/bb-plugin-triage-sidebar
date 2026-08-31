@@ -13,6 +13,9 @@ import plugin, {
   localSourcePath,
   MAX_AVATAR_BYTES,
   parseAutoArchiveDays,
+  parseAutoArchiveIntervalHours,
+  nextAutoArchiveRunAt,
+  type AutoArchiveSweepResult,
   type StoredAvatarRow,
   type StoredLifecycleRow,
 } from "./server";
@@ -44,6 +47,29 @@ async function settleLongAgo(
     .database()
     .prepare(`UPDATE thread_lifecycle SET settled_at = ? WHERE thread_id = ?`)
     .run(Date.now() - 30 * DAY_MS, threadId);
+}
+
+/**
+ * Settles a thread, then forgets the SDK calls that settling made.
+ *
+ * A settle reaps, and a reap reads terminals. Tests that assert a sweep made
+ * no calls at all are about the sweep's silence, not the settle's, so the
+ * setup's own traffic has to go before the assertion can mean anything.
+ */
+async function settleLongAgoQuietly(
+  host: FakePluginHost,
+  threadId: string,
+): Promise<void> {
+  await settleLongAgo(host, threadId);
+  host.harness.inspection.sdk.calls.length = 0;
+}
+
+/** Pretends the last sweep happened `ago` milliseconds before now. */
+function ageLastSweep(host: FakePluginHost, ago: number): void {
+  host.bb.storage
+    .database()
+    .prepare(`UPDATE plugin_state SET value = ? WHERE key = ?`)
+    .run(String(Date.now() - ago), "autoArchiveLastRunAt");
 }
 
 describe("parseAutoArchiveDays", () => {
@@ -121,6 +147,7 @@ describe("auto-archive sweep", () => {
         threads: {
           get: ({ threadId }) => makeThreadResponse({ id: threadId }),
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -137,6 +164,64 @@ describe("auto-archive sweep", () => {
     expect(await listRows(host)).toEqual([]);
   });
 
+  it("archives a whole subtree from the leaves up", async () => {
+    // The regression. bb's archive takes a thread's direct children with it,
+    // but archiving one of those children RELEASES its own children: their
+    // parent link is cleared and they come back as roots in the sidebar. A
+    // grandchild only survives archiving if its parent is already archived,
+    // so the sweep has to walk down and come back up.
+    const children: Record<string, string[]> = {
+      thr_old: ["thr_child"],
+      thr_child: ["thr_grandchild"],
+    };
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) => makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: (args) =>
+            (children[args?.parentThreadId ?? ""] ?? []).map((id) =>
+              makeThreadResponse({ id }),
+            ),
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_old");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_grandchild" }],
+      [{ threadId: "thr_child" }],
+      [{ threadId: "thr_old" }],
+    ]);
+  });
+
+  it("leaves the whole subtree alone when its children cannot be read", async () => {
+    // Archiving the top of a subtree it could not read is the half-measure
+    // this walk exists to avoid: it would release the children it never saw.
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) => makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: () => {
+            throw new Error("bb is unhappy");
+          },
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_old");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
+    // The row stays, so the next sweep gets another go at it.
+    expect(await listRows(host)).toHaveLength(1);
+  });
+
   it("leaves a thread that is working alone", async () => {
     const host = load({
       sdk: {
@@ -144,6 +229,7 @@ describe("auto-archive sweep", () => {
           get: ({ threadId }) =>
             makeThreadResponse({ id: threadId, status: "active" }),
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -168,6 +254,7 @@ describe("auto-archive sweep", () => {
               { id: "int_1", threadId, status: "pending" },
             ],
           },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -186,11 +273,12 @@ describe("auto-archive sweep", () => {
         threads: {
           get: ({ threadId }) => makeThreadResponse({ id: threadId }),
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
     });
-    await settleLongAgo(host, "thr_old");
+    await settleLongAgoQuietly(host, "thr_old");
 
     await host.harness.behavior.runSchedule("auto-archive");
 
@@ -207,6 +295,7 @@ describe("auto-archive sweep", () => {
             throw new Error("not found");
           },
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -234,6 +323,7 @@ describe("auto-archive sweep", () => {
               latestAttentionAt: Date.now() - DAY_MS,
             }),
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -244,7 +334,7 @@ describe("auto-archive sweep", () => {
 
     expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
     // And the stale row goes, so this is not a candidate the sweep has to talk
-    // itself out of again every hour.
+    // itself out of again on every pass.
     expect(await listRows(host)).toEqual([]);
   });
 
@@ -255,6 +345,7 @@ describe("auto-archive sweep", () => {
         threads: {
           get: ({ threadId }) => makeThreadResponse({ id: threadId }),
           interactions: { list: () => [] },
+          list: () => [],
           archive: () => ({ archived: 1 }),
         },
       },
@@ -358,6 +449,244 @@ function loadWithProject(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("parseAutoArchiveIntervalHours", () => {
+  it("reads a whole number of hours", () => {
+    expect(parseAutoArchiveIntervalHours("6")).toBe(6);
+    expect(parseAutoArchiveIntervalHours(" 12 ")).toBe(12);
+  });
+
+  // The schedule only ticks hourly, so anything under an hour would promise a
+  // sweep the ticker cannot deliver.
+  it("falls back to the default for anything it cannot honour", () => {
+    for (const raw of ["0", "-1", "0.5", "", "soon", undefined]) {
+      expect(parseAutoArchiveIntervalHours(raw)).toBe(4);
+    }
+  });
+});
+
+describe("nextAutoArchiveRunAt", () => {
+  const HOUR = 60 * 60 * 1000;
+  const at = (hours: number, minutes = 0) =>
+    Date.UTC(2026, 7, 27, hours, minutes);
+
+  // The interval says when the sweep is DUE; the hourly ticker says when it
+  // can actually happen. Reporting the due time would name a minute at which
+  // nothing runs.
+  it("rounds a due time up to the next tick", () => {
+    expect(nextAutoArchiveRunAt(at(14, 30), at(10, 20), 4)).toBe(at(15));
+  });
+
+  it("is the next tick when the sweep has never run", () => {
+    expect(nextAutoArchiveRunAt(at(14, 30), null, 4)).toBe(at(15));
+  });
+
+  // Overdue is not the same as due now: the tick is still what runs it.
+  it("is the next tick when the sweep is already overdue", () => {
+    expect(nextAutoArchiveRunAt(at(14, 30), at(1), 4)).toBe(at(15));
+  });
+
+  it("waits out a long interval rather than the next tick", () => {
+    // 14:00 plus twelve hours is 02:00 the following day, not today.
+    expect(nextAutoArchiveRunAt(at(14, 30), at(14), 12)).toBe(
+      Date.UTC(2026, 7, 28, 2),
+    );
+  });
+
+  it("lands exactly on the hour a due time already sits on", () => {
+    expect(nextAutoArchiveRunAt(at(14, 30), at(12), 6)).toBe(at(18));
+  });
+
+  it("never reports a time in the past", () => {
+    expect(nextAutoArchiveRunAt(at(14, 30), at(14, 29), 1)).toBeGreaterThan(
+      at(14, 30),
+    );
+  });
+});
+
+describe("the interval between sweeps", () => {
+  const sweeping = () => ({
+    threads: {
+      get: ({ threadId }: { threadId: string }) =>
+        makeThreadResponse({ id: threadId }),
+      interactions: { list: () => [] },
+      list: () => [],
+      archive: () => ({ archived: 1 }),
+    },
+  });
+
+  // No stamp means this plugin has never swept. Waiting an interval before the
+  // first one would leave a fresh install doing nothing for four hours.
+  it("sweeps on the first tick it ever sees", async () => {
+    const host = load({ sdk: sweeping() });
+    await settleLongAgo(host, "thr_old");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_old" }],
+    ]);
+  });
+
+  it("does nothing on a tick that lands inside the interval", async () => {
+    const host = load({ settings: { autoArchiveIntervalHours: "4" }, sdk: sweeping() });
+    await settleLongAgo(host, "thr_old");
+    // The first tick sweeps and starts the clock; the second is an hour later
+    // in a four-hour interval, so it must not even read a thread.
+    await host.harness.behavior.runSchedule("auto-archive");
+    host.harness.inspection.sdk.calls.length = 0;
+    await settleLongAgoQuietly(host, "thr_other");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.calls).toEqual([]);
+  });
+
+  it("sweeps again once the interval has elapsed", async () => {
+    const host = load({ settings: { autoArchiveIntervalHours: "4" }, sdk: sweeping() });
+    await settleLongAgo(host, "thr_old");
+    await host.harness.behavior.runSchedule("auto-archive");
+    host.harness.inspection.sdk.calls.length = 0;
+    await settleLongAgo(host, "thr_other");
+    ageLastSweep(host, 5 * 60 * 60 * 1000);
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_other" }],
+    ]);
+  });
+
+  // The whole reason the interval is not in the cron: the setting has to bite
+  // on the next tick, not on the next plugin load.
+  it("honours a shorter interval without a reload", async () => {
+    const host = load({ settings: { autoArchiveIntervalHours: "1" }, sdk: sweeping() });
+    await settleLongAgo(host, "thr_old");
+    await host.harness.behavior.runSchedule("auto-archive");
+    host.harness.inspection.sdk.calls.length = 0;
+    await settleLongAgo(host, "thr_other");
+    ageLastSweep(host, 90 * 60 * 1000);
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_other" }],
+    ]);
+  });
+
+  // The button is an explicit request; making it wait for the interval would
+  // defeat the point of having it.
+  it("lets the manual run ignore the interval", async () => {
+    const host = load({ settings: { autoArchiveIntervalHours: "4" }, sdk: sweeping() });
+    await settleLongAgo(host, "thr_old");
+    await host.harness.behavior.runSchedule("auto-archive");
+    host.harness.inspection.sdk.calls.length = 0;
+    await settleLongAgo(host, "thr_other");
+
+    await host.harness.behavior.callRpc("runAutoArchive", {});
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_other" }],
+    ]);
+  });
+});
+
+describe("runAutoArchive on demand", () => {
+  const sweep = async (host: FakePluginHost) =>
+    (await host.harness.behavior.callRpc(
+      "runAutoArchive",
+      {},
+    )) as AutoArchiveSweepResult;
+
+  it("archives the same threads the schedule would, and names them", async () => {
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) =>
+            makeThreadResponse({ id: threadId, title: "Fix the flake" }),
+          interactions: { list: () => [] },
+          list: () => [],
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_old");
+
+    const result = await sweep(host);
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([
+      [{ threadId: "thr_old" }],
+    ]);
+    expect(result.archived).toEqual([
+      { threadId: "thr_old", title: "Fix the flake" },
+    ]);
+    expect(result.candidates).toBe(1);
+  });
+
+  // The button is a way to see the sweep work, not a way around the switch:
+  // pressing it while auto-archive is off must archive nothing.
+  it("obeys the switch rather than overriding it", async () => {
+    const host = load({
+      settings: { autoArchiveEnabled: false },
+      sdk: {
+        threads: {
+          get: ({ threadId }) => makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: () => [],
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgoQuietly(host, "thr_old");
+
+    const result = await sweep(host);
+
+    expect(result.enabled).toBe(false);
+    expect(host.harness.inspection.sdk.calls).toEqual([]);
+    expect(await listRows(host)).toHaveLength(1);
+  });
+
+  // The ordinary case, and the one the button exists to make legible: a
+  // healthy sweep with nothing old enough yet still has to answer.
+  it("reports a run that found no candidates", async () => {
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) => makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: () => [],
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_fresh" });
+
+    const result = await sweep(host);
+
+    expect(result).toMatchObject({ enabled: true, candidates: 0, archived: [] });
+    expect(await listRows(host)).toHaveLength(1);
+  });
+
+  it("counts a thread it had to skip", async () => {
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }) =>
+            makeThreadResponse({ id: threadId, status: "active" }),
+          interactions: { list: () => [] },
+          list: () => [],
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_busy");
+
+    const result = await sweep(host);
+
+    expect(result.skipped).toBe(1);
+    expect(result.archived).toEqual([]);
+  });
 });
 
 describe("isAllowedAvatarDataUrl", () => {
@@ -1157,5 +1486,107 @@ describe("local favicon scan", () => {
     await host.harness.behavior.runSchedule("project-avatars");
 
     expect(host.harness.inspection.realtimeSignals.length).toBe(after);
+  });
+});
+
+describe("reaping on settle", () => {
+  const reaping = (): CreateFakePluginHostOptions["sdk"] => ({
+    threads: {
+      get: ({ threadId }: { threadId: string }) =>
+        makeThreadResponse({ id: threadId }),
+      interactions: { list: () => [] },
+      list: () => [],
+    },
+    terminals: {
+      list: () => ({
+        sessions: [
+          { id: "term_live", status: "running", title: "pnpm dev" },
+          // Already gone: closing it would be a call with nothing behind it.
+          { id: "term_done", status: "exited", title: "old shell" },
+        ],
+      }),
+      close: () => ({ id: "term_live", status: "exited" }),
+    },
+  });
+
+  it("closes the settled thread's live terminals", async () => {
+    const host = load({ sdk: reaping() });
+
+    const result = (await host.harness.behavior.callRpc("settle", {
+      threadId: "thr_done",
+    })) as {
+      reaped: { terminalsClosed: Array<{ terminalId: string; title: string }> };
+    };
+
+    expect(
+      host.harness.inspection.sdk.callsTo("terminals.close"),
+    ).toHaveLength(1);
+    // Named, not counted: the user has to be able to tell which server stopped.
+    expect(result.reaped.terminalsClosed).toEqual([
+      { terminalId: "term_live", title: "pnpm dev" },
+    ]);
+  });
+
+  it("leaves every terminal alone when the setting is off", async () => {
+    const host = load({
+      settings: { reapOnSettle: false },
+      sdk: reaping(),
+    });
+
+    const result = (await host.harness.behavior.callRpc("settle", {
+      threadId: "thr_done",
+    })) as { reaped: { enabled: boolean } };
+
+    expect(host.harness.inspection.sdk.callsTo("terminals.list")).toEqual([]);
+    expect(result.reaped.enabled).toBe(false);
+  });
+
+  // A subtree bb will not enumerate still leaves the thread the user actually
+  // settled, and reaping that one is strictly better than reaping none.
+  it("falls back to the thread itself when its children cannot be listed", async () => {
+    const host = load({
+      sdk: {
+        ...reaping(),
+        threads: {
+          get: ({ threadId }: { threadId: string }) =>
+            makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: () => {
+            throw new Error("no children for you");
+          },
+        },
+      },
+    });
+
+    const result = (await host.harness.behavior.callRpc("settle", {
+      threadId: "thr_done",
+    })) as {
+      reaped: { terminalsClosed: Array<{ terminalId: string }> };
+    };
+
+    expect(result.reaped.terminalsClosed).toHaveLength(1);
+  });
+
+  // The settle is the user's decision; cleanup is housekeeping that follows
+  // it. A host that cannot even list terminals must not undo the settle.
+  it("still settles the thread when the reap fails", async () => {
+    const host = load({
+      sdk: {
+        ...reaping(),
+        terminals: {
+          list: () => {
+            throw new Error("no daemon");
+          },
+        },
+      },
+    });
+
+    const result = (await host.harness.behavior.callRpc("settle", {
+      threadId: "thr_done",
+    })) as { ok: boolean; reaped: { terminalsFailed: number } };
+
+    expect(result.ok).toBe(true);
+    expect(result.reaped.terminalsFailed).toBe(1);
+    expect(await listRows(host)).toHaveLength(1);
   });
 });

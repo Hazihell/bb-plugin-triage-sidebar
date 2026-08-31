@@ -4,7 +4,6 @@ import {
   childrenOf,
   filterByProject,
   hideChildrenOfVisibleParents,
-  orderBySnapshot,
   parentOf,
   partitionPinned,
   searchThreadsByTitle,
@@ -127,54 +126,6 @@ describe("sortByAttentionDescending", () => {
     ];
     sortByAttentionDescending(input);
     expect(input.map((t) => t.id)).toEqual(["a", "b"]);
-  });
-});
-
-describe("orderBySnapshot", () => {
-  const ids = (threads: { id: string }[]) => threads.map((t) => t.id);
-  const snapshot = (...order: string[]) =>
-    new Map(order.map((id, index) => [id, index]));
-
-  it("holds the remembered order over a fresh sort", () => {
-    const held = orderBySnapshot(
-      [thread({ id: "c" }), thread({ id: "a" }), thread({ id: "b" })],
-      snapshot("a", "b", "c"),
-    );
-    expect(ids(held)).toEqual(["a", "b", "c"]);
-  });
-
-  it("drops a thread the fresh list no longer has", () => {
-    const held = orderBySnapshot(
-      [thread({ id: "a" }), thread({ id: "c" })],
-      snapshot("a", "b", "c"),
-    );
-    expect(ids(held)).toEqual(["a", "c"]);
-  });
-
-  // A thread that arrives mid-freeze must still be reachable, and one that
-  // sorts above everything belongs on top, not appended at the bottom.
-  it("places an arrival at its natural position", () => {
-    const held = orderBySnapshot(
-      [thread({ id: "new" }), thread({ id: "a" }), thread({ id: "b" })],
-      snapshot("b", "a"),
-    );
-    expect(ids(held)).toEqual(["new", "b", "a"]);
-  });
-
-  it("places an arrival after the remembered thread it follows", () => {
-    const held = orderBySnapshot(
-      [thread({ id: "a" }), thread({ id: "new" }), thread({ id: "b" })],
-      snapshot("b", "a"),
-    );
-    expect(ids(held)).toEqual(["b", "a", "new"]);
-  });
-
-  it("returns the fresh sort when nothing was remembered", () => {
-    const held = orderBySnapshot(
-      [thread({ id: "b" }), thread({ id: "a" })],
-      new Map(),
-    );
-    expect(ids(held)).toEqual(["b", "a"]);
   });
 });
 

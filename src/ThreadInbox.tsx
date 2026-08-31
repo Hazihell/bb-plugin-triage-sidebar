@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useSidebarThreadActions as useSidebarThreadActions,
   experimental_useSidebarThreads as useSidebarThreads,
@@ -24,7 +24,6 @@ import { TRAILING_GLYPH_BOX_CLASS } from "./StatusSlot";
 import {
   filterByProject,
   hideChildrenOfVisibleParents,
-  orderBySnapshot,
   partitionPinned,
   searchThreadsByTitle,
   sortByAttentionDescending,
@@ -37,12 +36,9 @@ const ALL_PROJECTS = "__all__";
 /**
  * The sidebar's scrolling list: one flat stack of cards, ordered by attention.
  *
- * Ordering by attention means rows move, so two rules keep the movement from
- * becoming noise. The list freezes its order while the pointer is over it or
- * a row inside it holds keyboard focus, because a row must never slide out
- * from under a cursor that is on its way to click. And when it does re-sort,
- * each moved row is tweened from where it was, so the user sees a thread
- * travel rather than a different list.
+ * Ordering by attention means rows move. To keep the movement from becoming
+ * noise, each moved row is tweened from where it was, so the user sees a
+ * thread travel rather than a different list.
  *
  * The host owns the New-thread button and the search field above it, so this
  * ships neither. It filters by the `searchQuery` prop and keeps only the one
@@ -74,16 +70,6 @@ export function ThreadInbox({
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [showSettled, setShowSettled] = useState(false);
 
-  // The freeze is two independent inputs, not one: the pointer can leave while
-  // focus is still parked on a row (tab in, then move the mouse away), and
-  // re-sorting under a focused row would send the keyboard user somewhere else.
-  const [isPointerInside, setPointerInside] = useState(false);
-  const [hasFocusInside, setFocusInside] = useState(false);
-  const isFrozen = isPointerInside || hasFocusInside;
-  // The order the user is currently looking at, refreshed after every commit.
-  // While frozen it is the authority; the fresh sort only decides where
-  // threads it has never seen are slotted in.
-  const committedOrderRef = useRef<ReadonlyMap<string, number>>(new Map());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   useFlipReorder(scrollRef);
 
@@ -116,26 +102,13 @@ export function ThreadInbox({
     // Every shelf reads the same ranking, including the parked ones: a user
     // who opens Snoozed is asking the same question as everywhere else, and a
     // second ordering rule would be one more thing to learn.
-    const held = (sorted: PluginSidebarThread[]) =>
-      isFrozen ? orderBySnapshot(sorted, committedOrderRef.current) : sorted;
     return {
-      pinned: held(sortByAttentionDescending(split.pinned)),
-      inbox: held(sortByAttentionDescending(split.inbox)),
-      snoozed: held(sortByAttentionDescending(onSnoozeShelf)),
-      settled: held(sortByAttentionDescending(onSettledShelf)),
+      pinned: sortByAttentionDescending(split.pinned),
+      inbox: sortByAttentionDescending(split.inbox),
+      snoozed: sortByAttentionDescending(onSnoozeShelf),
+      settled: sortByAttentionDescending(onSettledShelf),
     };
-  }, [isFrozen, lifecycle, scope, searchQuery, threads]);
-
-  // Recorded after the commit, so a frozen render re-reads the order it just
-  // showed: a thread that arrived mid-freeze is placed once and then stays put
-  // instead of being re-slotted on every unrelated re-render.
-  useLayoutEffect(() => {
-    const order = new Map<string, number>();
-    for (const thread of [...pinned, ...inbox, ...snoozed, ...settled]) {
-      order.set(thread.id, order.size);
-    }
-    committedOrderRef.current = order;
-  });
+  }, [lifecycle, scope, searchQuery, threads]);
 
   // One bundle per row, built where the lifecycle store lives. The card's
   // hover buttons and the menu's items then drive the same four calls, so the
@@ -230,16 +203,6 @@ export function ThreadInbox({
 
       <div
         ref={scrollRef}
-        // React's onFocus/onBlur are focusin/focusout, so they fire for any
-        // row inside — a plain focus/blur pair on a container never would.
-        onPointerEnter={() => setPointerInside(true)}
-        onPointerLeave={() => setPointerInside(false)}
-        onFocus={() => setFocusInside(true)}
-        onBlur={() => setFocusInside(false)}
-        // The freeze tests address the scroll area by this attribute; it has
-        // no accessible name of its own, and inventing one would announce a
-        // wrapper that means nothing to a screen reader.
-        data-triage-scroll=""
         className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
       >
         {status === "loading" ? null : status === "error" ? (

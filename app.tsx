@@ -12,6 +12,7 @@ import { ThreadInbox } from "./src/ThreadInbox";
 import { ParentChip } from "./src/ParentChip";
 import { SubagentsChip } from "./src/SubagentsChip";
 import { ProjectAvatarSettings } from "./src/ProjectAvatarSettings";
+import { AutoArchiveSettings } from "./src/AutoArchiveSettings";
 
 export default definePluginApp((app) => {
   app.slots.experimental_threadList({
@@ -50,5 +51,16 @@ export default definePluginApp((app) => {
     description:
       "One square per project, so the eye can group the list before it reads it. Set one yourself, or leave it to the project's own icon, the git host's image, and a generated monogram.",
     component: ProjectAvatarSettings,
+  });
+
+  // The sweep's switch and retention period are plain settings bb renders on
+  // its own; this section adds the one thing a setting cannot express — run
+  // it now, and tell me what it did.
+  app.slots.settingsSection({
+    id: "auto-archive",
+    title: "Auto-archive",
+    description:
+      "Settled threads leave the sidebar for the archive once they are older than the retention period. The sweep runs on the interval set above; this runs it now and reports what it archived.",
+    component: AutoArchiveSettings,
   });
 });
