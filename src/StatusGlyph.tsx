@@ -33,7 +33,7 @@ import { cn } from "./lib/utils";
  * the plugin theme exposes.
  */
 const LIVE_WORK_COLOR = "text-timeline-accent";
-const WAITING_COLOR = "text-attention";
+export const WAITING_COLOR = "text-attention";
 const IDLE_COLOR = "text-muted-foreground/50";
 
 /**

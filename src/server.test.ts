@@ -14,6 +14,7 @@ import plugin, {
   MAX_AVATAR_BYTES,
   parseAutoArchiveDays,
   parseAutoArchiveIntervalHours,
+  parseCacheWindow,
   nextAutoArchiveRunAt,
   type AutoArchiveSweepResult,
   type StoredAvatarRow,
@@ -108,8 +109,9 @@ describe("working duration", () => {
     ).toBe(true);
   });
 
-  it("clears the start when the thread goes idle", async () => {
+  it("clears the start and records the end when the thread goes idle", async () => {
     const host = load();
+    const before = Date.now();
     await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run" }),
     });
@@ -118,9 +120,80 @@ describe("working duration", () => {
       lastAssistantText: null,
     });
 
-    // Nothing parked it, so the row has nothing left to say and goes away
-    // entirely rather than lingering as an all-null row.
+    // The row survives its own emptying: when the last run ended is the idle
+    // clock every card reads, so a row carrying only that is not empty.
+    const [row] = await listRows(host);
+    expect(row?.startedWorkingAt).toBeNull();
+    expect(row?.lastRunEndedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  // An idle event for a thread this store never saw start is half a
+  // transition: there is no run whose end it could be recording.
+  it("records nothing when a thread it never saw running goes idle", async () => {
+    const host = load();
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_unseen" }),
+      lastAssistantText: null,
+    });
+
     expect(await listRows(host)).toEqual([]);
+  });
+
+  // A failed run has ended too, so it starts the same clock.
+  it("records the end when a run fails", async () => {
+    const host = load();
+    const before = Date.now();
+    await host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_boom" }),
+    });
+    await host.harness.behavior.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: "thr_boom" }),
+      error: "boom",
+    });
+
+    const [row] = await listRows(host);
+    expect(row?.lastRunEndedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  // A row written before the column existed reads as "never ran here" rather
+  // than breaking the read, and parking it keeps working.
+  it("reads a row that predates the column", async () => {
+    const host = load();
+    host.bb.storage
+      .database()
+      .prepare(
+        `INSERT INTO thread_lifecycle (thread_id, settled_at) VALUES (?, ?)`,
+      )
+      .run("thr_old_schema", Date.now());
+
+    const [row] = await listRows(host);
+    expect(row?.threadId).toBe("thr_old_schema");
+    expect(row?.lastRunEndedAt).toBeNull();
+
+    // A settle rewrites the whole row, and must not invent an end for a run
+    // it knows nothing about.
+    await host.harness.behavior.callRpc("settle", {
+      threadId: "thr_old_schema",
+    });
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBeNull();
+  });
+
+  // A parked thread's end time is the user's clock as much as bb's: settling
+  // or snoozing rewrites the row and must carry it through.
+  it("keeps the end time across a settle", async () => {
+    const host = load();
+    await host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_park" }),
+    });
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_park" }),
+      lastAssistantText: null,
+    });
+    const endedAt = (await listRows(host))[0]?.lastRunEndedAt;
+
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_park" });
+
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(endedAt);
   });
 
   it("keeps a parked thread's shelf when its run ends", async () => {
@@ -137,6 +210,38 @@ describe("working duration", () => {
     const [row] = await listRows(host);
     expect(row?.settledAt).not.toBeNull();
     expect(row?.startedWorkingAt).toBeNull();
+  });
+});
+
+describe("parseCacheWindow", () => {
+  it("reads a pair of whole minutes", () => {
+    expect(parseCacheWindow("20", "45")).toEqual({
+      warnAfterMinutes: 20,
+      coldAfterMinutes: 45,
+    });
+  });
+
+  // A crossed or unusable pair is a band no thread can be in, which reads
+  // exactly like a feature that does not work.
+  it("falls back to the defaults on an unusable or crossed pair", () => {
+    const defaults = { warnAfterMinutes: 50, coldAfterMinutes: 60 };
+    expect(parseCacheWindow("soon", "60")).toEqual(defaults);
+    expect(parseCacheWindow("50", "0")).toEqual(defaults);
+    expect(parseCacheWindow("60", "50")).toEqual(defaults);
+    expect(parseCacheWindow("50", "50")).toEqual(defaults);
+    expect(parseCacheWindow(undefined, undefined)).toEqual(defaults);
+  });
+});
+
+describe("getSettings", () => {
+  it("hands the sidebar the cache thresholds", async () => {
+    const host = load({
+      settings: { cacheWarnAfterMinutes: "10", cacheColdAfterMinutes: "25" },
+    });
+    expect(await host.harness.behavior.callRpc("getSettings", {})).toEqual({
+      cacheWarnAfterMinutes: 10,
+      cacheColdAfterMinutes: 25,
+    });
   });
 });
 
@@ -506,6 +611,36 @@ describe("nextAutoArchiveRunAt", () => {
 });
 
 describe("the interval between sweeps", () => {
+  // The sidebar folds a child's work into the parent's card, and the sweep has
+  // to read the tree the same way: archiving a parent takes its running
+  // children with it.
+  it("leaves a settled thread alone while one of its children works", async () => {
+    const host = load({
+      sdk: {
+        threads: {
+          get: ({ threadId }: { threadId: string }) =>
+            makeThreadResponse({ id: threadId }),
+          interactions: { list: () => [] },
+          list: () => [
+            makeThreadResponse({ id: "thr_child", status: "active" }),
+          ],
+          archive: () => ({ archived: 1 }),
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_parent");
+
+    const result = (await host.harness.behavior.callRpc(
+      "runAutoArchive",
+      {},
+    )) as AutoArchiveSweepResult;
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
+    // Skipped, not unsettled: work is a moment, and the settle still stands
+    // once the children are quiet again.
+    expect(result.skipped).toBe(1);
+  });
+
   const sweeping = () => ({
     threads: {
       get: ({ threadId }: { threadId: string }) =>

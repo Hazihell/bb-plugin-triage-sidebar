@@ -72,6 +72,35 @@ describe("sortByAttentionDescending", () => {
     expect(ordered.map((t) => t.id)).toEqual(["blocked", "fresh"]);
   });
 
+  // A parent's own attention time is stale while the work happens on rows the
+  // flat list does not show, so busy is a tier rather than a bonus.
+  it("floats a busy thread above quieter ones but below a blocked one", () => {
+    const ordered = sortByAttentionDescending(
+      [
+        thread({ id: "fresh", latestAttentionAt: 9_000 }),
+        thread({ id: "busy", latestAttentionAt: 1 }),
+        thread({
+          id: "blocked",
+          latestAttentionAt: 2,
+          hasPendingInteraction: true,
+        }),
+      ],
+      (candidate) => candidate.id === "busy",
+    );
+    expect(ordered.map((t) => t.id)).toEqual(["blocked", "busy", "fresh"]);
+  });
+
+  it("ranks two busy threads by attention time", () => {
+    const ordered = sortByAttentionDescending(
+      [
+        thread({ id: "older", latestAttentionAt: 1 }),
+        thread({ id: "newer", latestAttentionAt: 5 }),
+      ],
+      () => true,
+    );
+    expect(ordered.map((t) => t.id)).toEqual(["newer", "older"]);
+  });
+
   it("ranks two blocked threads by attention time", () => {
     const ordered = sortByAttentionDescending([
       thread({

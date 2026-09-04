@@ -20,12 +20,22 @@ export interface ThreadLifecycleRow {
    * a browser-side timer would restart on every remount.
    */
   startedWorkingAt: number | null;
+  /**
+   * When the thread's own last run ended, or null until it has finished one
+   * under this plugin. The card's idle age is measured from here; bb's
+   * `updatedAt` is only the fallback.
+   */
+  lastRunEndedAt: number | null;
 }
 
 /** The activity signals that outrank a user's parking decision. */
 export interface ThreadActivitySignals {
   hasPendingInteraction: boolean;
-  /** Any live work: runtime, workflows, background agents, plan, goals. */
+  /**
+   * Any live work — runtime, workflows, background agents, plan, goals —
+   * counting the thread's own children as its own. A parent whose subagents
+   * are running is not idle, whatever its own record says.
+   */
   isWorking: boolean;
   isUnread: boolean;
   /** Newest attention timestamp bb reports for the thread. */

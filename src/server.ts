@@ -83,6 +83,11 @@ const migrations = [
      key   TEXT PRIMARY KEY,
      value TEXT
    )`,
+  // When the thread's own last run ENDED. The age on a card is measured from
+  // here rather than from bb's updatedAt, because the question it answers is
+  // "how much of the agent's prompt-cache window is left", and updatedAt moves
+  // for things that have nothing to do with a run.
+  `ALTER TABLE thread_lifecycle ADD COLUMN last_run_ended_at INTEGER`,
 ];
 
 export interface StoredLifecycleRow {
@@ -99,6 +104,16 @@ export interface StoredLifecycleRow {
    * would reset it on every remount and lose it across a reload.
    */
   startedWorkingAt: number | null;
+  /**
+   * When the thread's own last run ended, as this plugin saw it; null until it
+   * has ever finished a run here.
+   *
+   * bb's `updatedAt` is the nearest thing it ships, and it is not the same
+   * question: it moves when a title changes or a message is queued. The card's
+   * idle age is how long the agent has been quiet, which is what says how much
+   * of its prompt-cache window is left.
+   */
+  lastRunEndedAt: number | null;
 }
 
 interface LifecycleDbRow {
@@ -107,6 +122,7 @@ interface LifecycleDbRow {
   snoozed_until: number | null;
   snoozed_at: number | null;
   started_working_at: number | null;
+  last_run_ended_at: number | null;
 }
 
 const threadIdSchema = z.object({ threadId: z.string().trim().min(1) });
@@ -157,6 +173,7 @@ export const triageSidebarRpcContract = defineRpcContract({
           snoozedUntil: z.number().nullable(),
           snoozedAt: z.number().nullable(),
           startedWorkingAt: z.number().nullable(),
+          lastRunEndedAt: z.number().nullable(),
         }),
       ),
     }),
@@ -211,6 +228,16 @@ export const triageSidebarRpcContract = defineRpcContract({
       forgotten: z.number(),
       failed: z.number(),
       reaped: reapSummarySchema,
+    }),
+  },
+  // The settings the SIDEBAR draws with, as opposed to the ones the backend
+  // acts on alone. bb renders the settings form and keeps the values on the
+  // server, and a component has no other way to read one.
+  getSettings: {
+    input: z.object({}),
+    output: z.object({
+      cacheWarnAfterMinutes: z.number(),
+      cacheColdAfterMinutes: z.number(),
     }),
   },
   ...projectAvatarRpcContract,
@@ -296,6 +323,48 @@ export function parseAutoArchiveDays(raw: string | undefined): number {
   return parsed;
 }
 
+
+/**
+ * The prompt-cache window, in minutes: when an idle thread is worth warning
+ * about, and when the window is simply gone.
+ *
+ * These are the two edges of one band, so they are parsed together: a warn
+ * threshold at or above the cold one would leave a band no thread can ever be
+ * in, and a card that never turns amber is indistinguishable from a broken
+ * one. A crossed pair falls back to the defaults rather than being silently
+ * reordered — the user typed something they meant, and guessing which half is
+ * the mistake is worse than saying nothing.
+ */
+export const DEFAULT_CACHE_WARN_AFTER_MINUTES = 50;
+export const DEFAULT_CACHE_COLD_AFTER_MINUTES = 60;
+
+export interface CacheWindowMinutes {
+  warnAfterMinutes: number;
+  coldAfterMinutes: number;
+}
+
+function parseMinutes(raw: string | undefined): number | null {
+  const parsed = Number(String(raw ?? "").trim());
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+export function parseCacheWindow(
+  warnRaw: string | undefined,
+  coldRaw: string | undefined,
+): CacheWindowMinutes {
+  const warn = parseMinutes(warnRaw);
+  const cold = parseMinutes(coldRaw);
+  if (warn === null || cold === null || warn >= cold) {
+    return {
+      warnAfterMinutes: DEFAULT_CACHE_WARN_AFTER_MINUTES,
+      coldAfterMinutes: DEFAULT_CACHE_COLD_AFTER_MINUTES,
+    };
+  }
+  return { warnAfterMinutes: warn, coldAfterMinutes: cold };
+}
 
 /** The subset of bb's thread DTO the sweep reads. */
 interface SweepThreadView {
@@ -472,6 +541,20 @@ export default function plugin(bb: BbPluginApi) {
       description: "A whole number of days. Anything else is read as 7.",
       default: String(DEFAULT_AUTO_ARCHIVE_DAYS),
     },
+    cacheWarnAfterMinutes: {
+      type: "string",
+      label: "Minutes before an idle thread's age turns amber",
+      description:
+        "A whole number of minutes, below the cold threshold. The age on a card is how long the agent has been quiet, which is how much of its prompt-cache window is left; past this it is worth knowing that a reply is about to cost a full re-read. Anything unusable is read as 50.",
+      default: String(DEFAULT_CACHE_WARN_AFTER_MINUTES),
+    },
+    cacheColdAfterMinutes: {
+      type: "string",
+      label: "Minutes after which the cache window is gone",
+      description:
+        "A whole number of minutes, above the warn threshold. Past this the warning stops: the window has already lapsed, and an amber age would go on nagging about a decision there is no longer anything to do about. Anything unusable is read as 60.",
+      default: String(DEFAULT_CACHE_COLD_AFTER_MINUTES),
+    },
     reapOnSettle: {
       type: "boolean",
       label: "Stop leftover terminals and processes when a thread settles",
@@ -500,7 +583,7 @@ export default function plugin(bb: BbPluginApi) {
       db
         .prepare(
           `SELECT thread_id, settled_at, snoozed_until, snoozed_at,
-                  started_working_at
+                  started_working_at, last_run_ended_at
              FROM thread_lifecycle`,
         )
         .all() as LifecycleDbRow[]
@@ -510,13 +593,14 @@ export default function plugin(bb: BbPluginApi) {
       snoozedUntil: row.snoozed_until,
       snoozedAt: row.snoozed_at,
       startedWorkingAt: row.started_working_at,
+      lastRunEndedAt: row.last_run_ended_at,
     }));
 
   const readOne = (threadId: string): StoredLifecycleRow | undefined => {
     const row = db
       .prepare(
         `SELECT thread_id, settled_at, snoozed_until, snoozed_at,
-                started_working_at
+                started_working_at, last_run_ended_at
            FROM thread_lifecycle WHERE thread_id = ?`,
       )
       .get(threadId) as LifecycleDbRow | undefined;
@@ -527,25 +611,29 @@ export default function plugin(bb: BbPluginApi) {
       snoozedUntil: row.snoozed_until,
       snoozedAt: row.snoozed_at,
       startedWorkingAt: row.started_working_at,
+      lastRunEndedAt: row.last_run_ended_at,
     };
   };
 
   const write = (row: StoredLifecycleRow): void => {
     db.prepare(
       `INSERT INTO thread_lifecycle
-         (thread_id, settled_at, snoozed_until, snoozed_at, started_working_at)
-       VALUES (?, ?, ?, ?, ?)
+         (thread_id, settled_at, snoozed_until, snoozed_at, started_working_at,
+          last_run_ended_at)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET
          settled_at = excluded.settled_at,
          snoozed_until = excluded.snoozed_until,
          snoozed_at = excluded.snoozed_at,
-         started_working_at = excluded.started_working_at`,
+         started_working_at = excluded.started_working_at,
+         last_run_ended_at = excluded.last_run_ended_at`,
     ).run(
       row.threadId,
       row.settledAt,
       row.snoozedUntil,
       row.snoozedAt,
       row.startedWorkingAt,
+      row.lastRunEndedAt,
     );
     bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId: row.threadId });
   };
@@ -568,20 +656,31 @@ export default function plugin(bb: BbPluginApi) {
    */
   const markWorking = (threadId: string, startedAt: number | null): void => {
     if (startedAt === null) {
+      // The stop is also the start of the idle clock: the same statement
+      // clears the run and records when it ended, so the two can never
+      // disagree about the same transition.
       const updated = db
         .prepare(
-          `UPDATE thread_lifecycle SET started_working_at = NULL
+          `UPDATE thread_lifecycle
+             SET started_working_at = NULL, last_run_ended_at = ?
              WHERE thread_id = ? AND started_working_at IS NOT NULL`,
         )
-        .run(threadId);
+        .run(Date.now(), threadId);
+      // Nothing was running here as far as this store knows, so there is no
+      // run to have ended. A row invented now would carry an idle age
+      // measured from an event this plugin never saw the other half of.
       if (updated.changes === 0) return;
+      // The empty-row rule still stands and now has one more column to
+      // consider: a row whose only content is when the last run ended is not
+      // empty — it is the idle clock every card reads.
       db.prepare(
         `DELETE FROM thread_lifecycle
            WHERE thread_id = ?
              AND settled_at IS NULL
              AND snoozed_until IS NULL
              AND snoozed_at IS NULL
-             AND started_working_at IS NULL`,
+             AND started_working_at IS NULL
+             AND last_run_ended_at IS NULL`,
       ).run(threadId);
     } else {
       db.prepare(
@@ -628,6 +727,7 @@ export default function plugin(bb: BbPluginApi) {
         snoozedUntil: null,
         snoozedAt: null,
         startedWorkingAt: readOne(threadId)?.startedWorkingAt ?? null,
+        lastRunEndedAt: readOne(threadId)?.lastRunEndedAt ?? null,
       });
       // After the write, never before: the shelf is the user's decision and
       // it stands even if every part of the cleanup fails.
@@ -646,6 +746,7 @@ export default function plugin(bb: BbPluginApi) {
         snoozedUntil,
         snoozedAt: now,
         startedWorkingAt: readOne(threadId)?.startedWorkingAt ?? null,
+        lastRunEndedAt: readOne(threadId)?.lastRunEndedAt ?? null,
       });
       return { ok: true };
     },
@@ -678,6 +779,17 @@ export default function plugin(bb: BbPluginApi) {
         bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId: null });
       }
       return result;
+    },
+    async getSettings() {
+      const values = await settings.get();
+      const window = parseCacheWindow(
+        values.cacheWarnAfterMinutes,
+        values.cacheColdAfterMinutes,
+      );
+      return {
+        cacheWarnAfterMinutes: window.warnAfterMinutes,
+        cacheColdAfterMinutes: window.coldAfterMinutes,
+      };
     },
     ...avatars.handlers,
   });
@@ -769,6 +881,35 @@ export default function plugin(bb: BbPluginApi) {
       includeHidden: true,
     });
     return children.map((child) => child.id);
+  };
+
+  /**
+   * Whether any of this thread's own children is working.
+   *
+   * The sidebar folds child work into the parent's card, and the sweep has to
+   * agree with it or it would archive a thread the sidebar is showing as busy.
+   * Direct children only, like the sidebar: a grandchild's work already keeps
+   * its own parent alive, and that parent is a child of this one.
+   *
+   * An unreadable list counts as working — when in doubt this sweep leaves the
+   * thread alone.
+   */
+  const isAnyChildWorking = async (parentThreadId: string): Promise<boolean> => {
+    try {
+      const children = await bb.sdk.threads.list({
+        parentThreadId,
+        archived: false,
+        includeHidden: true,
+      });
+      return children.some((child) =>
+        isThreadWorking(child as SweepThreadView),
+      );
+    } catch (error) {
+      bb.log.warn(
+        `auto-archive: could not read the children of ${parentThreadId}, leaving it alone (${String(error)})`,
+      );
+      return true;
+    }
   };
 
   /**
@@ -1078,7 +1219,11 @@ export default function plugin(bb: BbPluginApi) {
         continue;
       }
 
-      const isWorking = isThreadWorking(thread);
+      // Work on a child counts as work on the parent, exactly as the sidebar
+      // reads it: a thread whose subagents are running looks idle in its own
+      // DTO, and archiving it would take the running children with it.
+      const isWorking =
+        isThreadWorking(thread) || (await isAnyChildWorking(threadId));
       const latestAttentionAt = thread.latestAttentionAt ?? 0;
       const signals: ThreadActivitySignals = {
         isWorking,

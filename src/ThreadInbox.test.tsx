@@ -421,6 +421,174 @@ describe("working duration", () => {
   });
 });
 
+describe("child work", () => {
+  const MINUTE = 60_000;
+  const parentAndChild = (
+    childOverrides: Partial<PluginSidebarThread>,
+  ): PluginSidebarThread[] => [
+    thread({ id: "thr_parent", title: "Parent" }),
+    thread({
+      id: "thr_child",
+      title: "Child",
+      parentThreadId: "thr_parent",
+      ...childOverrides,
+    }),
+  ];
+
+  // The whole point: the child is not in the list, so without this the parent
+  // is a card with nothing to say while its subagent works.
+  it("spins the parent's slot while a child is running", async () => {
+    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    expect(await screen.findByLabelText("Child thread working")).toBeDefined();
+  });
+
+  // The spinner is the child's; the clock is the parent's own idle age. There
+  // is no child clock anywhere in this sidebar.
+  it("keeps the parent's idle age beside that spinner", async () => {
+    render(
+      parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }).map(
+        (t) =>
+          t.id === "thr_parent"
+            ? { ...t, updatedAt: Date.now() - (3 * 3_600_000 + MINUTE) }
+            : t,
+      ),
+    );
+    expect(await screen.findByLabelText("Child thread working")).toBeDefined();
+    expect(screen.getByText("3h")).toBeDefined();
+  });
+
+  it("counts running children on the parent's third line", async () => {
+    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    expect(await screen.findByLabelText("1 running child threads")).toBeDefined();
+    expect(screen.queryByLabelText(/child threads needing you/)).toBeNull();
+  });
+
+  it("counts children that need you, with the question glyph", async () => {
+    render(parentAndChild({ hasPendingInteraction: true }));
+    const badge = await screen.findByLabelText("1 child threads needing you");
+    expect(badge.querySelector('[data-icon="CircleQuestion"]')).not.toBeNull();
+  });
+
+  it("shows neither counter when the children are quiet", async () => {
+    render(parentAndChild({}));
+    expect(await screen.findByText("Parent")).toBeDefined();
+    expect(screen.queryByLabelText(/running child threads/)).toBeNull();
+    expect(screen.queryByLabelText(/child threads needing you/)).toBeNull();
+  });
+
+  // Busy is what decides parking, so the parent may not be filed away while
+  // work it cannot see is still running.
+  it("refuses to park a parent whose child is working", async () => {
+    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    expect(await screen.findByText("Parent")).toBeDefined();
+    expect(screen.queryByLabelText("Settle thread")).toBeNull();
+  });
+
+  it("floats a busy parent above a quieter thread", async () => {
+    render([
+      thread({ id: "thr_fresh", title: "Fresh", latestAttentionAt: 9_000 }),
+      thread({ id: "thr_parent", title: "Parent", latestAttentionAt: 1 }),
+      thread({
+        id: "thr_child",
+        title: "Child",
+        parentThreadId: "thr_parent",
+        indicator: "runtime",
+        latestAttentionAt: 1,
+      }),
+    ]);
+    await screen.findByText("Parent");
+    expect(rowTitles().map((text) => text?.slice(0, 20))).toEqual([
+      expect.stringContaining("Parent"),
+      expect.stringContaining("Fresh"),
+    ]);
+  });
+});
+
+describe("the cache window", () => {
+  const MINUTE = 60_000;
+  /** An idle thread whose last run ended `minutes` ago, and the thresholds. */
+  function renderIdle(minutes: number) {
+    const minuteBoundary = Math.floor(Date.now() / MINUTE) * MINUTE;
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_idle", title: "Idle" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_idle",
+              settledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+              startedWorkingAt: null,
+              lastRunEndedAt: minuteBoundary - minutes * MINUTE,
+            },
+          ],
+        }),
+        getSettings: () => ({
+          cacheWarnAfterMinutes: 50,
+          cacheColdAfterMinutes: 60,
+        }),
+      },
+    });
+  }
+
+  // The age is read to answer "is the cache still warm", so the answer is in
+  // the colour rather than in arithmetic the user has to do.
+  it("turns the idle age amber inside the warning band", async () => {
+    renderIdle(55);
+    const label = await screen.findByText("55m");
+    expect(label.className).toContain("text-attention");
+  });
+
+  it("leaves it neutral before the band", async () => {
+    renderIdle(10);
+    const label = await screen.findByText("10m");
+    expect(label.className).toContain("text-muted-foreground");
+  });
+
+  // Past the cold edge the window is already gone: an age that stayed amber
+  // would nag about a decision there is nothing left to make.
+  it("leaves it neutral once the window has lapsed", async () => {
+    renderIdle(75);
+    const label = await screen.findByText("1h");
+    expect(label.className).toContain("text-muted-foreground");
+  });
+
+  // The idle age is this plugin's own clock. bb's updatedAt moves for a
+  // retitle or a queued message, neither of which resets a prompt cache.
+  it("measures from the run's end rather than bb's updatedAt", async () => {
+    const minuteBoundary = Math.floor(Date.now() / MINUTE) * MINUTE;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({ id: "thr_idle", title: "Idle", updatedAt: minuteBoundary }),
+        ],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          rows: [
+            {
+              threadId: "thr_idle",
+              settledAt: null,
+              snoozedUntil: null,
+              snoozedAt: null,
+              startedWorkingAt: null,
+              lastRunEndedAt: minuteBoundary - 12 * MINUTE,
+            },
+          ],
+        }),
+      },
+    });
+    expect(await screen.findByText("12m")).toBeDefined();
+  });
+});
+
 describe("row context menu", () => {
   it("offers the plugin's own thread actions on right-click", async () => {
     render([thread({ id: "thr_menu", title: "Right click me" })]);
@@ -684,9 +852,9 @@ describe("card metadata", () => {
     expect(await screen.findByText("3h")).toBeDefined();
   });
 
-  // Status and age share one slot. A row that shows both puts a variable-width
-  // label in the column, and no two rows line up.
-  it("replaces the age label with the status glyph while work runs", async () => {
+  // The one row that spends the slot on a glyph alone: its own run is live, so
+  // there is no idle age to show, and the store has no start time to count.
+  it("shows no age while the thread's own run is live", async () => {
     render([
       thread({
         id: "thr_run",
@@ -724,7 +892,10 @@ describe("attention states", () => {
   ] as const;
 
   for (const [indicator, label] of states) {
-    it(`shows the ${indicator} glyph instead of the age`, async () => {
+    // Both, now. The glyph says what state the thread is in and the age says
+    // how long it has been in it, and on an idle thread that second number is
+    // what decides whether replying resumes a cached conversation.
+    it(`shows the ${indicator} glyph beside the age`, async () => {
       render([
         thread({
           id: `thr_${indicator}`,
@@ -734,7 +905,7 @@ describe("attention states", () => {
         }),
       ]);
       expect(await screen.findByLabelText(label)).toBeDefined();
-      expect(screen.queryByText("3h")).toBeNull();
+      expect(screen.getByText("3h")).toBeDefined();
     });
   }
 

@@ -11,6 +11,8 @@ import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
+import { WAITING_COLOR } from "./StatusGlyph";
+import type { CacheWindow } from "./cache-window";
 import { threadDisplayTitle } from "./inbox";
 import { resolveSnoozePresets } from "./lifecycle";
 
@@ -31,6 +33,9 @@ export function ThreadCard({
   park,
   onNavigate,
   startedWorkingAt,
+  lastRunEndedAt,
+  childWork,
+  cacheWindow,
   now,
 }: {
   thread: PluginSidebarThread;
@@ -51,6 +56,22 @@ export function ThreadCard({
    * spinner.
    */
   startedWorkingAt: number | null;
+  /**
+   * When this thread's own last run ended, or null when the store has never
+   * seen one end here. The slot falls back to bb's `updatedAt`.
+   */
+  lastRunEndedAt: number | null;
+  /**
+   * This thread's direct children, as counts rather than threads.
+   *
+   * The list hides a child while its parent is on screen, so a parent with
+   * three running subagents otherwise reads as an idle card. Counts, not the
+   * children themselves: the card says that work is happening down there and
+   * the header chip is where you go to see whose.
+   */
+  childWork: { running: number; needingYou: number };
+  /** Thresholds for the amber idle age. */
+  cacheWindow: CacheWindow;
   /** Quantized clock, so every card in one render agrees on "now". */
   now: number;
 }) {
@@ -133,6 +154,9 @@ export function ThreadCard({
                 thread={thread}
                 now={now}
                 startedWorkingAt={startedWorkingAt}
+                lastRunEndedAt={lastRunEndedAt}
+                isChildWorking={childWork.running > 0}
+                cacheWindow={cacheWindow}
               />
             </span>
           </div>
@@ -172,6 +196,26 @@ export function ThreadCard({
               <ActivityCount
                 label="background agents"
                 count={thread.activity.backgroundAgents}
+              />
+            ) : null}
+            {/* Child threads, in the same family as the counts beside them and
+                glyphed rather than bare, because a naked number here would
+                read as more of the parent's own activity. */}
+            {childWork.running > 0 ? (
+              <ActivityCount
+                label="running child threads"
+                count={childWork.running}
+                icon="UserRoundPlus"
+              />
+            ) : null}
+            {childWork.needingYou > 0 ? (
+              <ActivityCount
+                label="child threads needing you"
+                count={childWork.needingYou}
+                icon="CircleQuestion"
+                // The one thing on this line that is waiting on the human, in
+                // the colour the sidebar reserves for exactly that.
+                className={WAITING_COLOR}
               />
             ) : null}
             {pullRequest ? (
@@ -230,12 +274,27 @@ function ParkButton({
   );
 }
 
-function ActivityCount({ label, count }: { label: string; count: number }) {
+function ActivityCount({
+  label,
+  count,
+  icon,
+  className,
+}: {
+  label: string;
+  count: number;
+  /** Drawn before the number when the count alone would not say what of. */
+  icon?: Extract<IconName, "UserRoundPlus" | "CircleQuestion">;
+  className?: string;
+}) {
   return (
     <span
       aria-label={`${count} ${label}`}
-      className="shrink-0 rounded bg-muted px-1 font-mono text-2xs text-muted-foreground"
+      className={cn(
+        "flex shrink-0 items-center gap-0.5 rounded bg-muted px-1 font-mono text-2xs text-muted-foreground",
+        className,
+      )}
     >
+      {icon ? <Icon name={icon} className="size-3" aria-hidden /> : null}
       {count}
     </span>
   );

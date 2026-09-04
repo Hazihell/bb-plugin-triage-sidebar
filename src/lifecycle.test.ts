@@ -26,6 +26,7 @@ const row = (
   snoozedUntil: null,
   snoozedAt: null,
   startedWorkingAt: null,
+  lastRunEndedAt: null,
   ...overrides,
 });
 

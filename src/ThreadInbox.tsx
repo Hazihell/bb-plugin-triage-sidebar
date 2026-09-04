@@ -17,7 +17,8 @@ import {
 import { ThreadCard } from "./ThreadCard";
 import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
-import { useLifecycle } from "./useLifecycle";
+import { isWorking, useLifecycle } from "./useLifecycle";
+import { useCacheWindow } from "./useCacheWindow";
 import { useProjectAvatars } from "./useProjectAvatars";
 import { ProjectAvatar } from "./ProjectAvatar";
 import { TRAILING_GLYPH_BOX_CLASS } from "./StatusSlot";
@@ -53,6 +54,7 @@ export function ThreadInbox({
   const actions = useSidebarThreadActions();
   const lifecycle = useLifecycle(threads);
   const avatars = useProjectAvatars();
+  const cacheWindow = useCacheWindow();
   const [scope, setScope] = useState<string>(ALL_PROJECTS);
   // One clock for every card in a render, quantized to the minute so the
   // labels do not disagree and do not churn on unrelated re-renders.
@@ -77,6 +79,25 @@ export function ThreadInbox({
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects],
   );
+
+  // Counted over every thread the host reports, not the filtered list: the
+  // children whose work this reports are exactly the rows the list has
+  // removed, and a project scope or a search must not make a parent look idle.
+  const childWorkByParent = useMemo(() => {
+    const counts = new Map<string, { running: number; needingYou: number }>();
+    for (const thread of threads) {
+      if (thread.parentThreadId === null) continue;
+      const entry = counts.get(thread.parentThreadId) ?? {
+        running: 0,
+        needingYou: 0,
+      };
+      if (isWorking(thread)) entry.running += 1;
+      if (thread.hasPendingInteraction) entry.needingYou += 1;
+      counts.set(thread.parentThreadId, entry);
+    }
+    return counts;
+  }, [threads]);
+  const noChildWork = { running: 0, needingYou: 0 };
 
   const { pinned, inbox, snoozed, settled } = useMemo(() => {
     const scoped = filterByProject(
@@ -103,10 +124,10 @@ export function ThreadInbox({
     // who opens Snoozed is asking the same question as everywhere else, and a
     // second ordering rule would be one more thing to learn.
     return {
-      pinned: sortByAttentionDescending(split.pinned),
-      inbox: sortByAttentionDescending(split.inbox),
-      snoozed: sortByAttentionDescending(onSnoozeShelf),
-      settled: sortByAttentionDescending(onSettledShelf),
+      pinned: sortByAttentionDescending(split.pinned, lifecycle.isBusy),
+      inbox: sortByAttentionDescending(split.inbox, lifecycle.isBusy),
+      snoozed: sortByAttentionDescending(onSnoozeShelf, lifecycle.isBusy),
+      settled: sortByAttentionDescending(onSettledShelf, lifecycle.isBusy),
     };
   }, [lifecycle, scope, searchQuery, threads]);
 
@@ -135,6 +156,9 @@ export function ThreadInbox({
       park={parkFor(thread)}
       onNavigate={onNavigate}
       startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
+      lastRunEndedAt={lifecycle.lastRunEndedAtFor(thread.id)}
+      childWork={childWorkByParent.get(thread.id) ?? noChildWork}
+      cacheWindow={cacheWindow}
       now={now}
     />
   );

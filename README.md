@@ -65,14 +65,14 @@ Three shelves:
   (or the machine, when a thread has no worktree), activity counts, the
   pull-request number, and the agent glyph. Pinned threads sit above.
 
-  One slot, one width, so the whole column lines up. The slot shows the status
-  glyph while a thread has something to say, and the age ("now", "7m") once it
-  does not — with one exception: a running thread shows its spinner and a live
-  seconds timer side by side, because "how long has this been going" is the
-  question a glyph alone cannot answer. The slot is wide enough for that pair,
-  which is why it is wider than any single label. Hovering a card that can be
-  parked replaces the status with a snooze and a settle button; only the status
-  yields, so the project name never shifts.
+  One slot, one width, so the whole column lines up. Glyph on the left, clock
+  on the right: the glyph says what state the thread is in, and the clock says
+  how long it has been in it. A thread whose own run is live shows its spinner
+  and a live seconds timer. Every other row shows its idle age — how long the
+  agent has been quiet — beside whatever glyph it has, or on its own when it
+  has none. Hovering a card that can be parked replaces the status with a
+  snooze and a settle button; only the status yields, so the project name never
+  shifts.
 
   The glyphs are bb's own: the red circle-x for a failure, the circle-question
   for a raised hand, the spinner for live work, and a blue notification dot for
@@ -82,6 +82,22 @@ Three shelves:
 - **Snoozed** — hidden until a wake time you chose. A snoozed thread comes
   back early if it starts working or asks you something.
 - **Settled** — work you are done with, collapsed to one line each.
+
+## Cache window
+
+The idle age is not trivia about when you last spoke to a thread. An agent's
+prompt cache lapses on a timer, so the age is what says whether your next
+message resumes a cached conversation or pays to rebuild one — which is why it
+is measured from when that thread's own last run ENDED, recorded by this
+plugin, rather than from bb's `updatedAt`, which also moves for a retitle or a
+queued message.
+
+Two settings mark the band. Past **Minutes before an idle thread's age turns
+amber** the age is drawn in the same amber the raised-hand glyph uses. Past
+**Minutes after which the cache window is gone** it goes quiet again: the
+window has already lapsed, and a warning about a decision there is nothing left
+to make is noise on every stale row. The colour is only ever on an idle age — a
+run in flight is not yet a question about caching.
 
 ## Project avatars
 
@@ -140,6 +156,15 @@ relation instead:
 - On a child: a chip that names the parent and opens it. Without it the child
   is a dead end, because it is not in the list.
 
+Hiding the children leaves the parent's card looking idle while its subagents
+work, so the card carries the relation too. A parent whose child is running
+spins in its status slot — beside its own idle age, because a child's clock is
+not the parent's and this sidebar keeps none — and its third line counts the
+children that are running and the ones that are waiting on an answer, each only
+when there are any. Child work counts as the parent's own everywhere it
+matters: the parent floats up the list, cannot be settled or snoozed, and the
+auto-archive sweep leaves it alone.
+
 The parent chip sits on the left of the children chip, so the header reads up
 then down. A child that has children of its own shows both. Each disc takes
 its colour from the thread id, so the same thread keeps one colour in the list
@@ -160,7 +185,7 @@ header shows no parent chip.
 | `experimental_useSidebarThreadPullRequest`         | the `#412` badge, coloured by bb's attention state                                          |
 | `@radix-ui/react-context-menu` (shimmed)           | this plugin's own right-click menu, built on the action hook                                |
 | `settingsSection`                                  | the per-project avatar editor (the only place an avatar is set)                             |
-| `bb.settings.define`                               | auto-archive, and the switch behind each automatic avatar source                            |
+| `bb.settings.define`                               | auto-archive, the cache window, and each automatic avatar source's switch                   |
 | `bb.background.schedule`                           | the auto-archive pass (hourly ticker, user-set interval) and the avatar sweep                                           |
 | `bb.storage.database()` + `bb.rpc` + `bb.realtime` | the settled/snoozed store, and the project-avatar store behind it                            |
 

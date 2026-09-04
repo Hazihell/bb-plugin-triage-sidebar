@@ -10,16 +10,24 @@ import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
  * timestamp can ever reach instead of a large bonus that a busy afternoon of
  * other threads could out-age.
  *
+ * Between those two sits work in flight. A thread whose children are running
+ * carries a stale attention time — the work is happening on rows the flat list
+ * does not show — so it would sink under threads that have been quiet for
+ * hours. `isBusy` lifts it into a tier of its own instead of inventing a
+ * timestamp for it, which keeps the ranking a comparison of things that
+ * actually happened.
+ *
  * Ties break on attention time and then on id, so the order is total: two
  * threads never swap places between renders just because the host handed the
  * list over in a different order.
  */
 export function sortByAttentionDescending<T extends AttentionRanked>(
   threads: readonly T[],
+  isBusy: (thread: T) => boolean = () => false,
 ): T[] {
   return [...threads].sort(
     (left, right) =>
-      attentionKey(right) - attentionKey(left) ||
+      attentionTier(right, isBusy) - attentionTier(left, isBusy) ||
       right.latestAttentionAt - left.latestAttentionAt ||
       left.id.localeCompare(right.id),
   );
@@ -32,10 +40,20 @@ interface AttentionRanked {
   readonly latestAttentionAt: number;
 }
 
-function attentionKey(thread: AttentionRanked): number {
-  return thread.hasPendingInteraction
-    ? Number.MAX_SAFE_INTEGER
-    : thread.latestAttentionAt;
+/**
+ * The rank a timestamp cannot reach past: blocked on you, then working, then
+ * everything else in the order things last happened.
+ *
+ * Tiers rather than bonuses added to a timestamp. A bonus large enough to
+ * matter today is one a busy afternoon of other threads can out-age, and one
+ * that cannot be out-aged is a tier written as arithmetic.
+ */
+function attentionTier<T extends AttentionRanked>(
+  thread: T,
+  isBusy: (thread: T) => boolean,
+): number {
+  if (thread.hasPendingInteraction) return 2;
+  return isBusy(thread) ? 1 : 0;
 }
 
 export function threadDisplayTitle(thread: PluginSidebarThread): string {

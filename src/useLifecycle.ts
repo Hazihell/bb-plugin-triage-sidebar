@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import type { triageSidebarRpcContract } from "./server";
+import { childrenOf } from "./inbox";
 import {
   canPark,
   nextWakeDelayMs,
@@ -10,7 +11,13 @@ import {
   type ThreadShelf,
 } from "./lifecycle";
 
-/** Any live work at all, which blocks parking and wakes a parked thread. */
+/**
+ * The thread's OWN live work, which blocks parking and wakes a parked thread.
+ *
+ * Its own, and only its own: a card's spinner-and-timer is about the run this
+ * thread is accruing, and a parent has no clock for a child's. Everything that
+ * asks "is anything happening here" wants {@link busyThreadIds} instead.
+ */
 export function isWorking(thread: PluginSidebarThread): boolean {
   const { activity } = thread;
   return (
@@ -24,6 +31,41 @@ export function isWorking(thread: PluginSidebarThread): boolean {
   );
 }
 
+/**
+ * The threads that have work in flight, their children's included.
+ *
+ * A parent whose subagents are running carries nothing in its own record to
+ * say so, and would read as idle: parkable, sortable to the bottom, and
+ * archivable by the sweep. Folding a child's work into the parent is what
+ * makes the flat list honest about a tree it deliberately does not show.
+ *
+ * Direct children only. A grandchild's work already marks its own parent
+ * busy, and that parent is a child of this one, so depth arrives on its own
+ * for any tree the sidebar can see.
+ *
+ * One pass over the list rather than a lookup per card: the sort asks this of
+ * every row, and `childrenOf` is a scan.
+ */
+export function busyThreadIds(
+  threads: readonly PluginSidebarThread[],
+): ReadonlySet<string> {
+  const busy = new Set<string>();
+  for (const thread of threads) {
+    if (!isWorking(thread)) continue;
+    busy.add(thread.id);
+    if (thread.parentThreadId !== null) busy.add(thread.parentThreadId);
+  }
+  return busy;
+}
+
+/** Whether one thread is busy, for a caller that has no list to scan. */
+export function isBusy(
+  thread: PluginSidebarThread,
+  threads: readonly PluginSidebarThread[],
+): boolean {
+  return isWorking(thread) || childrenOf(threads, thread.id).some(isWorking);
+}
+
 export interface LifecycleApi {
   shelfFor(thread: PluginSidebarThread): ThreadShelf;
   canPark(thread: PluginSidebarThread): boolean;
@@ -33,6 +75,13 @@ export interface LifecycleApi {
    * is not running or the store has never seen it run.
    */
   startedWorkingAtFor(threadId: string): number | null;
+  /**
+   * When the thread's own last run ended, or null when this plugin has never
+   * seen one end. The caller falls back to bb's `updatedAt`.
+   */
+  lastRunEndedAtFor(threadId: string): number | null;
+  /** Live work on the thread or on any of its direct children. */
+  isBusy(thread: PluginSidebarThread): boolean;
   settle(threadId: string): void;
   unsettle(threadId: string): void;
   snooze(threadId: string, snoozedUntil: number): void;
@@ -93,9 +142,12 @@ export function useLifecycle(
   }, [now, rows]);
 
   return useMemo<LifecycleApi>(() => {
+    const busy = busyThreadIds(threads);
     const signalsFor = (thread: PluginSidebarThread) => ({
       hasPendingInteraction: thread.hasPendingInteraction,
-      isWorking: isWorking(thread),
+      // Busy, not the thread's own work: a parent whose children are running
+      // may not be parked, and the shelves must agree with the card.
+      isWorking: busy.has(thread.id),
       isUnread: thread.isUnread,
       latestAttentionAt: thread.latestAttentionAt,
     });
@@ -117,6 +169,9 @@ export function useLifecycle(
       // `undefined`.
       startedWorkingAtFor: (threadId) =>
         rows.get(threadId)?.startedWorkingAt ?? null,
+      lastRunEndedAtFor: (threadId) =>
+        rows.get(threadId)?.lastRunEndedAt ?? null,
+      isBusy: (thread) => busy.has(thread.id),
       settle: (threadId) => void mutate("settle", threadId),
       unsettle: (threadId) => void mutate("unsettle", threadId),
       unsnooze: (threadId) => void mutate("unsnooze", threadId),
@@ -124,5 +179,5 @@ export function useLifecycle(
         void rpc.call("snooze", { threadId, snoozedUntil });
       },
     };
-  }, [now, refresh, rows, rpc]);
+  }, [now, refresh, rows, rpc, threads]);
 }
