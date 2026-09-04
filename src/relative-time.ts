@@ -37,3 +37,21 @@ export function elapsedLabel(startedAt: number, now: number): string {
   if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
   return `${Math.floor(elapsed / DAY)}d`;
 }
+
+/**
+ * How long a thread has been idle: "0m", "1m", "2h", "3d".
+ *
+ * Separate from {@link elapsedLabel} because an idle age starts at minutes.
+ * The question it answers is "how much of the cache window is left", and
+ * seconds are noise for that: knowing an agent finished eight seconds ago does
+ * not change whether to resume or start fresh. The coarsest label is a minute,
+ * which the list's shared minute clock can carry without churning.
+ *
+ * Negatives (a clock running slightly ahead across machines) clamp to "0m".
+ */
+export function idleAgeLabel(idleSince: number, now: number): string {
+  const elapsed = Math.max(0, now - idleSince);
+  if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m`;
+  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
+  return `${Math.floor(elapsed / DAY)}d`;
+}

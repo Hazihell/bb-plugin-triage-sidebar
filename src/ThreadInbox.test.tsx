@@ -536,6 +536,12 @@ describe("the cache window", () => {
     });
   }
 
+  it("starts the idle age at minutes rather than seconds", async () => {
+    renderIdle(0);
+    const label = await screen.findByText("0m");
+    expect(label.className).toContain("text-muted-foreground");
+  });
+
   // The age is read to answer "is the cache still warm", so the answer is in
   // the colour rather than in arithmetic the user has to do.
   it("turns the idle age amber inside the warning band", async () => {

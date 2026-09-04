@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import { StatusGlyph, hasStatusGlyph, WAITING_COLOR } from "./StatusGlyph";
 import { isWorking } from "./useLifecycle";
-import { elapsedLabel } from "./relative-time";
+import { elapsedLabel, idleAgeLabel } from "./relative-time";
 import { cn } from "./lib/utils";
 import {
   DEFAULT_CACHE_WINDOW,
@@ -54,8 +54,6 @@ export const STATUS_SLOT_CLASS = "flex w-12 shrink-0 items-center justify-end";
 export const TRAILING_GLYPH_BOX_CLASS =
   "flex size-3.5 shrink-0 items-center justify-center";
 
-const MINUTE_MS = 60_000;
-
 /**
  * Glyph on the left, a clock on the right, on every row that has either.
  *
@@ -100,16 +98,10 @@ export function StatusOrTime({
 }) {
   const isOwnRunLive = isWorking(thread);
   const isRunning = startedWorkingAt !== null && isOwnRunLive;
-  const idleSince = lastRunEndedAt ?? thread.updatedAt;
-  // A duration under a minute is seconds, and the list's shared clock ticks
-  // once a minute: a freshly idle row would hold one stale reading for its
-  // whole first minute without a ticker of its own. It stops as soon as the
-  // label is coarse enough for the shared clock to carry it.
-  const isFreshlyIdle = !isOwnRunLive && now - idleSince < 2 * MINUTE_MS;
-  const liveNow = useSecondsClock(isRunning || isFreshlyIdle);
-  const clock = Math.max(liveNow, now);
+  const liveNow = useSecondsClock(isRunning);
 
   if (isOwnRunLive) {
+    const clock = Math.max(liveNow, now);
     return (
       <span className="flex items-center gap-1">
         {/* The thread's own glyph when it has one, so a workflow still reads
@@ -132,7 +124,8 @@ export function StatusOrTime({
     );
   }
 
-  const age = elapsedLabel(idleSince, clock);
+  const idleSince = lastRunEndedAt ?? thread.updatedAt;
+  const age = idleAgeLabel(idleSince, now);
   return (
     <span className="flex items-center gap-1">
       {hasStatusGlyph(thread.indicator) ? (
@@ -148,7 +141,7 @@ export function StatusOrTime({
           "tabular-nums text-2xs",
           // Only the idle age is ever coloured. An own-run timer counts work
           // in flight, where the cache window is not yet a question.
-          isCacheWarning(clock - idleSince, cacheWindow)
+          isCacheWarning(now - idleSince, cacheWindow)
             ? WAITING_COLOR
             : "text-muted-foreground",
         )}

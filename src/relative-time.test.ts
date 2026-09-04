@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elapsedLabel, relativeTimeLabel } from "./relative-time";
+import { elapsedLabel, idleAgeLabel, relativeTimeLabel } from "./relative-time";
 
 const NOW = 1_000_000_000;
 const MINUTE = 60_000;
@@ -45,5 +45,28 @@ describe("elapsedLabel", () => {
 
   it("floors a clock that runs ahead of the start stamp at zero", () => {
     expect(elapsedLabel(NOW + 5_000, NOW)).toBe("0s");
+  });
+});
+
+describe("idleAgeLabel", () => {
+  it("starts at minutes rather than seconds", () => {
+    expect(idleAgeLabel(NOW, NOW)).toBe("0m");
+    expect(idleAgeLabel(NOW - 8_000, NOW)).toBe("0m");
+    expect(idleAgeLabel(NOW - 59_000, NOW)).toBe("0m");
+    expect(idleAgeLabel(NOW - MINUTE, NOW)).toBe("1m");
+    expect(idleAgeLabel(NOW - 5 * MINUTE, NOW)).toBe("5m");
+  });
+
+  it("switches to hours and days at the same thresholds as elapsedLabel", () => {
+    expect(idleAgeLabel(NOW - 59 * MINUTE, NOW)).toBe("59m");
+    expect(idleAgeLabel(NOW - HOUR, NOW)).toBe("1h");
+    expect(idleAgeLabel(NOW - 23 * HOUR, NOW)).toBe("23h");
+    expect(idleAgeLabel(NOW - DAY, NOW)).toBe("1d");
+    expect(idleAgeLabel(NOW - 3 * DAY, NOW)).toBe("3d");
+  });
+
+  it("clamps negatives to '0m'", () => {
+    expect(idleAgeLabel(NOW + 5_000, NOW)).toBe("0m");
+    expect(idleAgeLabel(NOW + 5 * MINUTE, NOW)).toBe("0m");
   });
 });
