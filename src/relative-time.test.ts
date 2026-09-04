@@ -49,10 +49,10 @@ describe("elapsedLabel", () => {
 });
 
 describe("idleAgeLabel", () => {
-  it("starts at minutes rather than seconds", () => {
-    expect(idleAgeLabel(NOW, NOW)).toBe("0m");
-    expect(idleAgeLabel(NOW - 8_000, NOW)).toBe("0m");
-    expect(idleAgeLabel(NOW - 59_000, NOW)).toBe("0m");
+  it("reads 'now' under a minute", () => {
+    expect(idleAgeLabel(NOW, NOW)).toBe("now");
+    expect(idleAgeLabel(NOW - 8_000, NOW)).toBe("now");
+    expect(idleAgeLabel(NOW - 59_000, NOW)).toBe("now");
     expect(idleAgeLabel(NOW - MINUTE, NOW)).toBe("1m");
     expect(idleAgeLabel(NOW - 5 * MINUTE, NOW)).toBe("5m");
   });
@@ -65,8 +65,8 @@ describe("idleAgeLabel", () => {
     expect(idleAgeLabel(NOW - 3 * DAY, NOW)).toBe("3d");
   });
 
-  it("clamps negatives to '0m'", () => {
-    expect(idleAgeLabel(NOW + 5_000, NOW)).toBe("0m");
-    expect(idleAgeLabel(NOW + 5 * MINUTE, NOW)).toBe("0m");
+  it("clamps negatives to 'now'", () => {
+    expect(idleAgeLabel(NOW + 5_000, NOW)).toBe("now");
+    expect(idleAgeLabel(NOW + 5 * MINUTE, NOW)).toBe("now");
   });
 });

@@ -536,9 +536,9 @@ describe("the cache window", () => {
     });
   }
 
-  it("starts the idle age at minutes rather than seconds", async () => {
+  it("starts the idle age at 'now' rather than seconds", async () => {
     renderIdle(0);
-    const label = await screen.findByText("0m");
+    const label = await screen.findByText("now");
     expect(label.className).toContain("text-muted-foreground");
   });
 
