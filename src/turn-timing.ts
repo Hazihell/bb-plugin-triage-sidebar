@@ -263,22 +263,20 @@ export async function readStoppedTiming(
 }
 
 /**
- * Whether the thread's newest turn was one the agent started by itself
- * because a background task ended, rather than one bb started with input.
+ * When the background task ended whose end made the agent start the thread's
+ * newest turn by itself; null when bb started that turn with input.
  *
  * bb logs `turn/input/accepted` right after the start of every turn it asks
  * for — a user's message, a queued one, a child's report to its parent. A
  * turn the provider starts on its own has none. Claude Code starts one when a
- * background command it launched exits, and that includes a dev server the
- * settle's cleanup just killed. Only that case counts: a turn with no input
- * whose start does not directly follow a background task's end is left to
- * speak for itself.
+ * background command it launched exits. Only a start that directly follows a
+ * background task's end counts; any other turn with no input is left alone.
  */
-export async function isBackgroundWakeTurn(
+export async function backgroundWakeTaskEnd(
   log: TurnEventLog,
   threadId: string,
   signal?: AbortSignal,
-): Promise<boolean> {
+): Promise<number | null> {
   const rows = await log.list({
     threadId,
     types: ["turn/started", "turn/input/accepted", "item/backgroundTask/completed"],
@@ -289,14 +287,17 @@ export async function isBackgroundWakeTurn(
   return backgroundWakeFromRows(rows);
 }
 
-/** The rule {@link isBackgroundWakeTurn} applies, over rows newest first. */
-export function backgroundWakeFromRows(rows: readonly TurnEventRow[]): boolean {
+/** The rule {@link backgroundWakeTaskEnd} applies, over rows newest first. */
+export function backgroundWakeFromRows(
+  rows: readonly TurnEventRow[],
+): number | null {
   const start = rows.findIndex((row) => row.type === "turn/started");
-  if (start === -1) return false;
+  if (start === -1) return null;
   if (rows.slice(0, start).some((row) => row.type === "turn/input/accepted")) {
-    return false;
+    return null;
   }
-  return rows[start + 1]?.type === "item/backgroundTask/completed";
+  const trigger = rows[start + 1];
+  return trigger?.type === "item/backgroundTask/completed" ? trigger.createdAt : null;
 }
 
 /**

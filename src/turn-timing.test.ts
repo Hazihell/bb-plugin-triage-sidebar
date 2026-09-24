@@ -27,7 +27,7 @@ describe("backgroundWakeFromRows", () => {
         row(4, "item/backgroundTask/completed"),
         row(2, "turn/input/accepted"),
       ]),
-    ).toBe(true);
+    ).toBe(4);
   });
 
   it("reads a turn bb started with input as the thread's own", () => {
@@ -37,14 +37,14 @@ describe("backgroundWakeFromRows", () => {
         row(5, "turn/started"),
         row(4, "item/backgroundTask/completed"),
       ]),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   it("needs the background task's end right before the start", () => {
     expect(
       backgroundWakeFromRows([row(5, "turn/started"), row(3, "turn/input/accepted")]),
-    ).toBe(false);
-    expect(backgroundWakeFromRows([])).toBe(false);
+    ).toBeNull();
+    expect(backgroundWakeFromRows([])).toBeNull();
   });
 });
 

@@ -395,25 +395,38 @@ describe("turn timing", () => {
   });
 
   describe("a turn the agent starts because a background command ended", () => {
-    // Settling kills the dev server; Claude Code answers with a turn of its
-    // own, and bb stamps attention on the thread when that turn ends.
-    async function settleThenRun(accepted: boolean) {
+    // Claude Code answers a background command's end with a turn of its own,
+    // and bb stamps attention on the thread when that turn ends.
+    async function settleThenWake({
+      commandEndedAfterReap,
+      accepted = false,
+    }: {
+      commandEndedAfterReap: number;
+      accepted?: boolean;
+    }) {
       const log = eventLog({
         thr_dev: [
           { seq: 1, createdAt: T, type: "turn/started" },
           { seq: 2, createdAt: T + 1, type: "turn/input/accepted" },
           { seq: 3, createdAt: T + 1_000, type: "turn/completed" },
-          { seq: 4, createdAt: T + 2_000, type: "item/backgroundTask/completed" },
-          { seq: 5, createdAt: T + 3_000, type: "turn/started" },
-          ...(accepted
-            ? [{ seq: 6, createdAt: T + 3_001, type: "turn/input/accepted" as const }]
-            : []),
-          { seq: 7, createdAt: T + 9_000, type: "turn/completed" },
         ],
       });
-      const host = load({ sdk: { threads: { events: log.sdk } } });
+      // A live thread list, so the settle's reap runs and opens its window.
+      const host = load({
+        sdk: { threads: { ...liveThreads([listRow({ id: "thr_dev" })]), events: log.sdk } },
+      });
       await host.harness.behavior.callRpc("settle", { threadId: "thr_dev" });
+      await flushTasks();
       const settledAt = (await listRows(host))[0]!.settledAt!;
+
+      const ended = Date.now() + commandEndedAfterReap;
+      log.push("thr_dev", { seq: 4, createdAt: ended, type: "item/backgroundTask/completed" });
+      log.push("thr_dev", { seq: 5, createdAt: ended + 1_000, type: "turn/started" });
+      if (accepted) {
+        log.push("thr_dev", { seq: 6, createdAt: ended + 1_001, type: "turn/input/accepted" });
+      }
+      log.push("thr_dev", { seq: 7, createdAt: ended + 9_000, type: "turn/completed" });
+
       await host.harness.behavior.emitThreadEvent("thread.active", {
         thread: makeThreadResponse({
           id: "thr_dev",
@@ -425,22 +438,31 @@ describe("turn timing", () => {
         thread: makeThreadResponse({
           id: "thr_dev",
           status: "idle",
-          latestAttentionAt: settledAt + 5_000,
+          latestAttentionAt: ended + 9_500,
         }),
         lastAssistantText: null,
       });
       await flushTasks();
-      return { row: (await listRows(host))[0], settledAt };
+      return { row: (await listRows(host))[0], settledAt, ended };
     }
 
-    it("discounts that turn's attention, so the thread stays settled", async () => {
-      const { row, settledAt } = await settleThenRun(false);
+    // The settle's cleanup killed the command: the agent's answer to that is
+    // not the thread speaking up.
+    it("keeps the thread settled when the reap stopped the command", async () => {
+      const { row, settledAt, ended } = await settleThenWake({ commandEndedAfterReap: 0 });
       expect(row?.settledAt).toBe(settledAt);
-      expect(row?.quietAttentionAt).toBe(settledAt + 5_000);
+      expect(row?.quietAttentionAt).toBe(ended + 9_500);
+    });
+
+    // A command that finished on its own well after the settle, and the agent
+    // reporting on it, brings the thread back as before.
+    it("lets a command that finished by itself bring the thread back", async () => {
+      const { row } = await settleThenWake({ commandEndedAfterReap: 60_000 });
+      expect(row?.quietAttentionAt).toBeNull();
     });
 
     it("leaves a turn bb started with input to speak for itself", async () => {
-      const { row } = await settleThenRun(true);
+      const { row } = await settleThenWake({ commandEndedAfterReap: 0, accepted: true });
       expect(row?.quietAttentionAt).toBeNull();
     });
   });

@@ -31,7 +31,7 @@ import {
 } from "./lifecycle-sync";
 import {
   forEachLimited,
-  isBackgroundWakeTurn,
+  backgroundWakeTaskEnd,
   readStartedTiming,
   readStoppedTiming,
   readTurnTiming,
@@ -117,7 +117,19 @@ const migrations = [
   // Attention up to this time does not un-park the thread: it came from a
   // turn the agent started by itself when a background command ended.
   `ALTER TABLE thread_lifecycle ADD COLUMN quiet_attention_at INTEGER`,
+  // When the newest reap covering this thread started and ended; the end is
+  // null while it runs. A background command that ended inside this window
+  // was stopped by the plugin, not finished on its own. Internal: never sent
+  // to the sidebar.
+  `ALTER TABLE thread_lifecycle ADD COLUMN reap_started_at INTEGER`,
+  `ALTER TABLE thread_lifecycle ADD COLUMN reap_ended_at INTEGER`,
 ];
+
+/**
+ * How long after a reap ends a background command's end still counts as the
+ * reap's doing: the agent logs a killed command's end a moment after the kill.
+ */
+export const REAP_GRACE_MS = 10_000;
 
 export interface StoredLifecycleRow {
   threadId: string;
@@ -636,7 +648,8 @@ export default function plugin(bb: BbPluginApi) {
            AND started_working_at IS NULL
            AND last_run_ended_at IS NULL
            AND ended_start_seq IS NULL
-           AND quiet_attention_at IS NULL`,
+           AND quiet_attention_at IS NULL
+           AND reap_started_at IS NULL`,
     ).run(threadId);
   };
 
@@ -646,7 +659,8 @@ export default function plugin(bb: BbPluginApi) {
    * The parking columns and bb's timing columns answer to different owners:
    * the user parks a thread, bb decides when it runs. This touches the first
    * three and never the other two, so un-parking a thread keeps its idle age.
-   * It also drops any discounted attention: that belonged to the old park.
+   * It also drops any discounted attention and reap window: those belonged
+   * to the old park, and a settle's own reap opens a new window after this.
    */
   const writeParking = (
     threadId: string,
@@ -663,7 +677,9 @@ export default function plugin(bb: BbPluginApi) {
          settled_at = excluded.settled_at,
          snoozed_until = excluded.snoozed_until,
          snoozed_at = excluded.snoozed_at,
-         quiet_attention_at = NULL`,
+         quiet_attention_at = NULL,
+         reap_started_at = NULL,
+         reap_ended_at = NULL`,
     ).run(threadId, parking.settledAt, parking.snoozedUntil, parking.snoozedAt);
     deleteIfEmpty(threadId);
     publishRow(threadId);
@@ -936,6 +952,38 @@ export default function plugin(bb: BbPluginApi) {
     ),
   );
 
+  /** Open (end null) or close the reap window on every thread a reap covers. */
+  const markReapWindow = (
+    threadIds: readonly string[],
+    startedAt: number,
+    endedAt: number | null,
+  ): void => {
+    const statement = db.prepare(
+      `INSERT INTO thread_lifecycle (thread_id, reap_started_at, reap_ended_at)
+         VALUES (?, ?, ?)
+       ON CONFLICT(thread_id) DO UPDATE SET
+         reap_started_at = excluded.reap_started_at,
+         reap_ended_at = excluded.reap_ended_at`,
+    );
+    for (const threadId of threadIds) statement.run(threadId, startedAt, endedAt);
+  };
+
+  /** Whether a background task that ended at `endedAt` was stopped by a reap. */
+  const endedInReap = (threadId: string, endedAt: number): boolean => {
+    const window = db
+      .prepare(
+        `SELECT reap_started_at, reap_ended_at FROM thread_lifecycle WHERE thread_id = ?`,
+      )
+      .get(threadId) as
+      | { reap_started_at: number | null; reap_ended_at: number | null }
+      | undefined;
+    if (window?.reap_started_at == null) return false;
+    return (
+      endedAt >= window.reap_started_at &&
+      endedAt <= (window.reap_ended_at ?? Number.POSITIVE_INFINITY) + REAP_GRACE_MS
+    );
+  };
+
   /**
    * Threads whose running turn started while they sat parked with nothing
    * said since the park. Only these can have their turn's attention
@@ -961,14 +1009,14 @@ export default function plugin(bb: BbPluginApi) {
 
   /**
    * Keep a parked thread parked through a turn the agent started by itself
-   * because a background command ended.
+   * because the settle's cleanup stopped one of its background commands.
    *
-   * Settling kills the dev servers an agent left running, and Claude Code
-   * answers a killed background command with a turn of its own. bb stamps
-   * new attention on the thread when that turn ends, which reads to the
-   * shelves as the thread speaking up, so it would bounce back to the inbox
-   * seconds after the user filed it away. Anything else the turn does — a
-   * question, more work — still brings it back on its own terms.
+   * Claude Code answers a background command's end with a turn of its own,
+   * and bb stamps new attention on the thread when that turn ends, which
+   * reads to the shelves as the thread speaking up. Only a command that ended
+   * inside a reap's window is discounted: one that finished by itself, and
+   * the agent reporting on it, is the thread speaking up and brings it back.
+   * So does anything else the turn does — a question, more work.
    */
   const discountBackgroundWake = async (thread: {
     id: string;
@@ -976,12 +1024,12 @@ export default function plugin(bb: BbPluginApi) {
   }): Promise<void> => {
     if (!parkedAtTurnStart.delete(thread.id) || unloaded()) return;
     try {
-      const woke = await isBackgroundWakeTurn(
+      const wokeBy = await backgroundWakeTaskEnd(
         bb.sdk.threads.events,
         thread.id,
         lifetime.signal,
       );
-      if (!woke || unloaded()) return;
+      if (wokeBy === null || unloaded() || !endedInReap(thread.id, wokeBy)) return;
     } catch (error) {
       if (unloaded()) return;
       bb.log.warn(
@@ -1210,97 +1258,106 @@ export default function plugin(bb: BbPluginApi) {
     // lifetime this one owns, and the hidden threads spun off from it.
     const tree = archiveTreeOf(index, rootThreadId);
 
-    // One entry per environment, so a tree sharing one worktree — the usual
-    // case — sweeps it once.
-    const targets = new Map<string, ReapTarget>();
+    // Every command that ends from here until shortly after the reap is the
+    // reap's doing, which is what keeps the agent's answer to it from
+    // un-parking the thread.
+    const reapStartedAt = Date.now();
+    markReapWindow(tree, reapStartedAt, null);
+    try {
+      // One entry per environment, so a tree sharing one worktree — the usual
+      // case — sweeps it once.
+      const targets = new Map<string, ReapTarget>();
 
-    for (const threadId of tree) {
-      if (!mayProceed()) return summary;
-      const thread = index.get(threadId);
-      const path = thread?.environmentPath?.trim() ?? "";
-      if (thread?.environmentId != null && thread.environmentIsWorktree === true && path !== "") {
-        targets.set(thread.environmentId, {
-          environmentId: thread.environmentId,
-          hostId: thread.environmentHostId,
-          path,
-        });
-      }
-      // A thread in the tree that is running again — resumed after the
-      // settle — keeps its terminals: they are serving the turn in flight.
-      if (thread === undefined || isTurnLive(thread)) continue;
+      for (const threadId of tree) {
+        if (!mayProceed()) return summary;
+        const thread = index.get(threadId);
+        const path = thread?.environmentPath?.trim() ?? "";
+        if (thread?.environmentId != null && thread.environmentIsWorktree === true && path !== "") {
+          targets.set(thread.environmentId, {
+            environmentId: thread.environmentId,
+            hostId: thread.environmentHostId,
+            path,
+          });
+        }
+        // A thread in the tree that is running again — resumed after the
+        // settle — keeps its terminals: they are serving the turn in flight.
+        if (thread === undefined || isTurnLive(thread)) continue;
 
-      try {
-        const { sessions } = await bb.sdk.terminals.list({
-          scope: { kind: "thread", threadId },
-        });
-        for (const session of sessions) {
-          // An already-exited session has nothing to close, and reporting it
-          // as closed would credit this reap with a death it did not cause.
-          if (session.status === "exited") continue;
-          if (!mayProceed()) return summary;
-          try {
-            await bb.sdk.terminals.close({
-              terminalId: session.id,
-              // The thread is finished, so there is no unsaved work to protect
-              // and "if-clean" would leave exactly the busy dev server this
-              // whole feature exists to stop.
-              mode: "force",
-            });
-            summary.terminalsClosed.push({
-              terminalId: session.id,
-              title: session.title,
-            });
-          } catch (error) {
-            bb.log.warn(
-              `reap: closing terminal ${session.id} failed (${String(error)})`,
-            );
-            summary.terminalsFailed += 1;
+        try {
+          const { sessions } = await bb.sdk.terminals.list({
+            scope: { kind: "thread", threadId },
+          });
+          for (const session of sessions) {
+            // An already-exited session has nothing to close, and reporting it
+            // as closed would credit this reap with a death it did not cause.
+            if (session.status === "exited") continue;
+            if (!mayProceed()) return summary;
+            try {
+              await bb.sdk.terminals.close({
+                terminalId: session.id,
+                // The thread is finished, so there is no unsaved work to protect
+                // and "if-clean" would leave exactly the busy dev server this
+                // whole feature exists to stop.
+                mode: "force",
+              });
+              summary.terminalsClosed.push({
+                terminalId: session.id,
+                title: session.title,
+              });
+            } catch (error) {
+              bb.log.warn(
+                `reap: closing terminal ${session.id} failed (${String(error)})`,
+              );
+              summary.terminalsFailed += 1;
+            }
           }
+        } catch (error) {
+          bb.log.warn(
+            `reap: could not list the terminals of ${threadId} (${String(error)})`,
+          );
+          summary.terminalsFailed += 1;
         }
-      } catch (error) {
-        bb.log.warn(
-          `reap: could not list the terminals of ${threadId} (${String(error)})`,
+      }
+
+      for (const target of targets.values()) {
+        if (!mayProceed()) return summary;
+        if (target.hostId === null) {
+          bb.log.warn(`reap: no machine is recorded for ${target.path}, nothing stopped`);
+          summary.worktreesSkipped.push({ path: target.path, reason: "unreachable" });
+          continue;
+        }
+        if (await isEnvironmentInUse(target.environmentId)) {
+          summary.worktreesSkipped.push({ path: target.path, reason: "in-use" });
+          continue;
+        }
+        // Asked again after the in-use read: the user can undo while it runs.
+        if (!mayProceed()) return summary;
+        const outcome = await callHostReap({ ...target, hostId: target.hostId });
+        if (unloaded()) return summary;
+        if (outcome.kind === "done") {
+          if (outcome.report.refused !== null) {
+            bb.log.warn(`reap: host refused ${target.path} (${outcome.report.refused})`);
+          }
+          summary.processesKilled.push(...outcome.report.killed);
+          summary.processesFailed += outcome.report.failed;
+        } else {
+          summary.worktreesSkipped.push({ path: target.path, reason: outcome.kind });
+        }
+      }
+
+      if (
+        summary.processesKilled.length > 0 ||
+        summary.terminalsClosed.length > 0 ||
+        summary.worktreesSkipped.length > 0
+      ) {
+        bb.log.info(
+          `reap: ${rootThreadId} — closed ${summary.terminalsClosed.length} terminals, killed ${summary.processesKilled.length} processes across ${targets.size} worktrees, skipped ${summary.worktreesSkipped.length}`,
         );
-        summary.terminalsFailed += 1;
       }
+      return summary;
+    } finally {
+      if (!unloaded()) markReapWindow(tree, reapStartedAt, Date.now());
     }
-
-    for (const target of targets.values()) {
-      if (!mayProceed()) return summary;
-      if (target.hostId === null) {
-        bb.log.warn(`reap: no machine is recorded for ${target.path}, nothing stopped`);
-        summary.worktreesSkipped.push({ path: target.path, reason: "unreachable" });
-        continue;
-      }
-      if (await isEnvironmentInUse(target.environmentId)) {
-        summary.worktreesSkipped.push({ path: target.path, reason: "in-use" });
-        continue;
-      }
-      // Asked again after the in-use read: the user can undo while it runs.
-      if (!mayProceed()) return summary;
-      const outcome = await callHostReap({ ...target, hostId: target.hostId });
-      if (unloaded()) return summary;
-      if (outcome.kind === "done") {
-        if (outcome.report.refused !== null) {
-          bb.log.warn(`reap: host refused ${target.path} (${outcome.report.refused})`);
-        }
-        summary.processesKilled.push(...outcome.report.killed);
-        summary.processesFailed += outcome.report.failed;
-      } else {
-        summary.worktreesSkipped.push({ path: target.path, reason: outcome.kind });
-      }
-    }
-
-    if (
-      summary.processesKilled.length > 0 ||
-      summary.terminalsClosed.length > 0 ||
-      summary.worktreesSkipped.length > 0
-    ) {
-      bb.log.info(
-        `reap: ${rootThreadId} — closed ${summary.terminalsClosed.length} terminals, killed ${summary.processesKilled.length} processes across ${targets.size} worktrees, skipped ${summary.worktreesSkipped.length}`,
-      );
-    }
-    return summary;
   };
 
   /**
