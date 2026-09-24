@@ -1409,6 +1409,34 @@ describe("jump shortcuts", () => {
     );
   });
 
+  // The park actions stay mounted under the key pill, so a snooze menu that
+  // is open when the modifier goes down is not torn out from under focus.
+  it("keeps the park actions mounted while the key shows", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_k" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarShortcuts: { thr_k: { label: "⌘1", ariaKeyshortcuts: "Meta+1" } },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
+    });
+    await listReady();
+    expect(screen.getByText("⌘1")).toBeDefined();
+    fireEvent.keyDown(screen.getByLabelText("Snooze"), { key: "Enter" });
+    expect(await screen.findByRole("menu", { name: "Snooze" })).toBeDefined();
+  });
+
+  // Visually hidden at rest, not removed from the tab order, so Shift+Tab
+  // from the next row reaches Settle and Snooze.
+  it("keeps the park actions in the tab order at rest", async () => {
+    render([thread({ id: "thr_t" })]);
+    await listReady();
+    const strip = screen.getByLabelText("Settle thread").parentElement!;
+    expect(strip.className).toContain("sr-only");
+    expect(strip.className.split(" ")).not.toContain("hidden");
+  });
+
   it("shows no key when the modifier is up", async () => {
     render([thread({ id: "thr_k" })]);
     await listReady();

@@ -8,7 +8,8 @@ import { Icon } from "./components/Icon";
 import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
-import { ShortcutPill, ThreadRowLink } from "./ThreadRowLink";
+import { ThreadRowLink } from "./ThreadRowLink";
+import { RowAside } from "./RowAside";
 import { snoozeWakeLabel } from "./lifecycle";
 import type { CacheWindow } from "./cache-window";
 
@@ -84,38 +85,39 @@ export function SlimRow({
               is held; otherwise, for a snoozed row, when it comes back, which
               yields on hover to the restore button. The slot itself keeps the
               card's glyph and clock, in the card's column. */}
-          {shortcut !== null ? (
-            <ShortcutPill shortcut={shortcut} />
-          ) : (
-            <span className="relative flex shrink-0 items-center">
-              {wakeLabel !== null ? (
+          <RowAside
+            row="slim"
+            shortcut={shortcut}
+            rest={
+              wakeLabel === null ? null : (
                 <span
                   aria-label={`Wakes in ${wakeLabel}`}
-                  className="pointer-events-none flex items-center gap-0.5 text-2xs tabular-nums text-muted-foreground/60 group-hover/slim:hidden group-has-[:focus-visible]/slim:hidden"
+                  className="flex items-center gap-0.5 text-2xs tabular-nums text-muted-foreground/60"
                 >
                   <Icon name="Clock" className="size-3" aria-hidden />
                   {wakeLabel}
                 </span>
-              ) : null}
-              <button
-                type="button"
-                aria-label={
-                  shelf === "snoozed" ? "Wake thread now" : "Un-settle thread"
-                }
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onRestore();
-                }}
-                className="pointer-events-auto hidden cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground group-hover/slim:flex group-has-[:focus-visible]/slim:flex"
-              >
-                <Icon
-                  name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}
-                  className="size-3.5"
-                />
-              </button>
-            </span>
-          )}
+              )
+            }
+          >
+            <button
+              type="button"
+              aria-label={
+                shelf === "snoozed" ? "Wake thread now" : "Un-settle thread"
+              }
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onRestore();
+              }}
+              className="cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Icon
+                name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}
+                className="size-3.5"
+              />
+            </button>
+          </RowAside>
           <span
             className={cn(STATUS_SLOT_CLASS, "pointer-events-none relative")}
           >

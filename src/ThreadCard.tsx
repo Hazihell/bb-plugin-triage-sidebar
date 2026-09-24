@@ -19,7 +19,8 @@ import type { StoredProjectAvatar } from "./project-avatar";
 import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { ProviderGlyph, type ProviderRecord } from "./ProviderGlyph";
-import { ShortcutPill, ThreadRowLink } from "./ThreadRowLink";
+import { ThreadRowLink } from "./ThreadRowLink";
+import { RowAside } from "./RowAside";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { WAITING_COLOR } from "./StatusGlyph";
 import type { CacheWindow } from "./cache-window";
@@ -133,11 +134,9 @@ export function ThreadCard({
                 modifier is held, otherwise the park actions on hover or
                 keyboard focus. The slot keeps its glyph and clock through
                 all of it. */}
-            {shortcut !== null ? (
-              <ShortcutPill shortcut={shortcut} />
-            ) : park.canPark ? (
-              <ParkStrip park={park} />
-            ) : null}
+            <RowAside row="card" shortcut={shortcut}>
+              {park.canPark ? <ParkActions park={park} /> : null}
+            </RowAside>
             <span className={STATUS_SLOT_CLASS}>
               <StatusOrTime
                 thread={thread}
@@ -244,24 +243,18 @@ export function ThreadCard({
 }
 
 /**
- * Settle and snooze, beside the status slot on hover or keyboard focus.
+ * Settle and snooze, shown beside the status slot by {@link RowAside}.
  *
  * Snooze opens the same presets as the right-click menu rather than picking
  * one: "tomorrow" is the wrong answer at 10am, and a second click is cheaper
- * than a wrong wake-up. While that menu is open the strip stays drawn, so the
- * menu keeps its anchor when the pointer leaves the card for it, and the
- * list's order holds, so the row it belongs to does not move away.
+ * than a wrong wake-up. While that menu is open the list's order holds, so the
+ * row it belongs to does not move away from it.
  */
-function ParkStrip({ park }: { park: ParkMenuActions }) {
+function ParkActions({ park }: { park: ParkMenuActions }) {
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   useHoldOrderWhile(snoozeOpen);
   return (
-    <span
-      className={cn(
-        "pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex group-has-[:focus-visible]/card:flex",
-        snoozeOpen && "flex",
-      )}
-    >
+    <>
       <DropdownMenu open={snoozeOpen} onOpenChange={setSnoozeOpen}>
         <DropdownMenuTrigger asChild>
           <button
@@ -297,7 +290,7 @@ function ParkStrip({ park }: { park: ParkMenuActions }) {
       >
         <Icon name="Check" className="size-3.5" />
       </button>
-    </span>
+    </>
   );
 }
 
