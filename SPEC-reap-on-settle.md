@@ -12,12 +12,16 @@ archiving nor closing a pane would ever have reached them.
 When a thread settles, the settle is written and answered at once. The reap
 then runs on its own and reports on the lifecycle channel:
 
-1. Walk the subtree deepest-first, reusing `collectSubtreeDeepestFirst`. A
-   parent never reaps before its children are quiet.
+1. Read bb's thread list fresh and walk the tree bb's archive would take —
+   children, threads whose lifetime this one owns, and hidden threads spun off
+   from it — deepest first. A parent never reaps before its children are
+   quiet. A list that cannot be read stops nothing: without it there is no
+   knowing which thread is running now.
 2. Close every terminal bb still reports as live for those threads — deepest
    first — via `bb.terminals.list` filtered by `threadId`, then `close`. An
    already-exited session is skipped: there is nothing to close, and counting
-   it would credit the reap with a death it did not cause.
+   it would credit the reap with a death it did not cause. A thread in the
+   tree that is running again (resumed after the settle) keeps its terminals.
 3. Only once every terminal in the subtree is closed, sweep the worktrees those
    threads belong to. Two phases rather than close-then-sweep per thread: a
    subtree usually shares one worktree, and sweeping it while a parent's
@@ -27,12 +31,17 @@ then runs on its own and reports on the lifecycle channel:
    gets its terminals closed and nothing else: it is where the user works too,
    and their shells, editor and own dev server cannot be told apart from what
    an agent left behind.
-5. A worktree where a thread outside the settled subtree is mid-turn (bb's
-   thread is active, starting, stopping or provisioning, or has background
-   agents running) is skipped and reported as in use. Killing under a live
-   agent breaks work the user has not finished with.
+5. A worktree where any thread is mid-turn — the settled tree's own threads
+   included — is skipped and reported as in use. Mid-turn means bb's thread
+   is active, starting, stopping or provisioning, or has background agents
+   running. Killing under a live agent breaks work the user has not finished
+   with, and the server decides this from a fresh read just before the kill,
+   whatever the sidebar thought when it allowed the settle.
 6. The sweep runs on the machine that holds the worktree: the server calls the
-   plugin's host entry with `hostId` taken from the environment. The host
+   plugin's host entry with `hostId` taken from the environment. A worktree
+   with no machine on record is reported unreachable. A call that runs past
+   60s is abandoned and reported as timed out — not "nothing stopped", since
+   the kill may already have run. The host
    entry uses bb's `experimental_killProcessesWithCwdUnder`, which matches a
    process by its working directory, resolves a symlinked parent, and is
    boundary-safe, so a sibling worktree whose path merely starts the same way
@@ -43,8 +52,13 @@ then runs on its own and reports on the lifecycle channel:
 Reaping is best-effort per thread. A subtree bb will not enumerate falls back to
 reaping the one thread that was settled; a terminal that will not close, or a
 process that will not die, is reported and skipped. The settle is the user's
-decision and must not fail because cleanup did — and an undone settle stops the
-reap before its next destructive step.
+decision and must not fail because cleanup did. An undone settle stops the
+reap before its next destructive step, including right before the host call;
+unloading the plugin aborts a reap in flight, host call included.
+
+The auto-archive sweep judges each candidate twice: once from the list it
+starts with, and again from a fresh read after the reap and immediately before
+the archive. Work anywhere in the archive tree blocks it.
 
 ## What it deliberately does not do
 No guard for an idle sibling. A worktree shared with an unsettled thread that

@@ -131,6 +131,10 @@ function eventLog(initial: Record<string, LogRow[]> = {}) {
       (rows[threadId] ??= []).push(row);
       if (!quietly) this.flush();
     },
+    /** Every wait still open resolves empty, as a timed-out wait does. */
+    timeOut() {
+      for (const waiter of waiters.splice(0)) waiter.resolve(null);
+    },
     /** Answers every open wait whose row has landed. */
     flush() {
       for (const waiter of [...waiters]) {
@@ -413,6 +417,8 @@ describe("turn timing", () => {
           threads: {
             events: log.sdk,
             list: (args) => threads.slice(args?.offset ?? 0),
+            // Asked fresh, per thread, only where the log shows a turn open.
+            get: ({ threadId }) => threads.find((thread) => thread.id === threadId)!,
           },
         },
       });
@@ -444,6 +450,100 @@ describe("turn timing", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("turn timing races", () => {
+  const T = 1_790_000_000_000;
+
+  // A reload lands mid-turn-end: the idle event's read is waiting for the
+  // completion row when the backfill reaches the same thread. The backfill
+  // knows less, so it steps aside rather than cancelling the event's read.
+  it("lets the backfill yield to an event read already in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = eventLog({
+        thr_run: [
+          { seq: 1, createdAt: T, type: "turn/completed" },
+          { seq: 2, createdAt: T + 1_000, type: "turn/started" },
+        ],
+      });
+      const host = load({
+        sdk: {
+          threads: {
+            events: log.sdk,
+            list: () => [makeThreadResponse({ id: "thr_run", status: "active" })],
+            get: () => makeThreadResponse({ id: "thr_run", status: "active" }),
+          },
+        },
+      });
+      const idle = host.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
+        lastAssistantText: null,
+      });
+      await vi.advanceTimersByTimeAsync(BACKFILL_DELAY_MS + 10);
+
+      log.push("thr_run", { seq: 3, createdAt: T + 9_000, type: "turn/completed" });
+      await idle;
+
+      expect((await listRows(host))[0]).toMatchObject({
+        startedWorkingAt: null,
+        lastRunEndedAt: T + 9_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A turn that stopped without writing its completion leaves its start on
+  // top of the log. The next turn's timer must not count from it.
+  it("does not count the next turn from a start that already stopped", async () => {
+    const log = eventLog({
+      thr_run: [
+        { seq: 1, createdAt: T, type: "turn/completed" },
+        { seq: 2, createdAt: T + 1_000, type: "turn/started" },
+      ],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    // The turn fails and its completion never lands; the wait gives up.
+    const failed = host.harness.behavior.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: "thr_run", status: "error" }),
+      error: "provider crashed",
+    });
+    await flushTasks();
+    log.timeOut();
+    await failed;
+
+    // Hours later the user resumes; bb announces the turn before its row.
+    const active = host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_run", status: "active" }),
+    });
+    await flushTasks();
+    expect((await listRows(host))[0]?.startedWorkingAt).toBeNull();
+
+    log.push("thr_run", { seq: 5, createdAt: T + 7_200_000, type: "turn/started" });
+    await active;
+    expect((await listRows(host))[0]?.startedWorkingAt).toBe(T + 7_200_000);
+  });
+
+  // Unload must stop the plugin writing and publishing on the old run's
+  // behalf, even with a read still waiting for its row.
+  it("writes nothing after unload", async () => {
+    const log = eventLog({
+      thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    const active = host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_run", status: "active" }),
+    });
+    await flushTasks();
+    const published = host.harness.inspection.realtimeSignals.length;
+    await host.harness.lifecycle.dispose();
+
+    log.push("thr_run", { seq: 2, createdAt: T + 1, type: "turn/started" });
+    await active.catch(() => {});
+
+    expect(host.harness.inspection.realtimeSignals.length).toBe(published);
   });
 });
 
@@ -584,7 +684,14 @@ type ListRow = ReturnType<typeof listRow>;
  */
 function liveThreads(rows: ListRow[]) {
   const treeOf = (id: string): string[] => [
-    ...rows.filter((row) => row.parentThreadId === id).flatMap((row) => treeOf(row.id)),
+    ...rows
+      .filter(
+        (row) =>
+          row.parentThreadId === id ||
+          row.lifecycleOwnerThreadId === id ||
+          (row.visibility === "hidden" && row.sourceThreadId === id),
+      )
+      .flatMap((row) => treeOf(row.id)),
     id,
   ];
   return {
@@ -656,7 +763,7 @@ describe("auto-archive sweep", () => {
 
   // The N+1 this replaced: one list read answers every candidate, and nothing
   // is asked per thread except the archive itself.
-  it("reads the thread list once, however many candidates there are", async () => {
+  it("asks bb nothing per thread but the list and the archive", async () => {
     const host = load({ sdk: sweeping("thr_a", "thr_b", "thr_c") });
     for (const id of ["thr_a", "thr_b", "thr_c"]) await settleLongAgo(host, id);
     host.harness.inspection.sdk.calls.length = 0;
@@ -664,8 +771,9 @@ describe("auto-archive sweep", () => {
     await host.harness.behavior.callRpc("runAutoArchive", {});
 
     const paths = host.harness.inspection.sdk.calls.map((call) => call.path);
-    // Each reap reuses the sweep's list rather than reading its own.
-    expect(paths.filter((path) => path === "threads.list")).toHaveLength(1);
+    // One list to choose, then per archived thread one for its reap and one
+    // to judge it again just before the archive. Nothing per thread else.
+    expect(paths.filter((path) => path === "threads.list")).toHaveLength(1 + 3 * 2);
     expect(paths.filter((path) => path === "threads.archive")).toHaveLength(3);
     expect(paths.some((path) => path === "threads.get")).toBe(false);
     expect(paths.some((path) => path === "threads.interactions.list")).toBe(false);
@@ -717,6 +825,54 @@ describe("auto-archive sweep", () => {
     expect(
       host.harness.inspection.experimental_hostRpcCalls.map((call) => call.hostId),
     ).toEqual(["host_remote"]);
+  });
+
+  // The sweep's first judgement is from its start; a thread resumed while an
+  // earlier candidate's reap held the sweep must not be archived anyway.
+  it("judges again from a fresh read just before archiving", async () => {
+    let reads = 0;
+    const idle = liveThreads([listRow({ id: "thr_old" })]);
+    const resumed = liveThreads([listRow({ id: "thr_old", status: "active" })]);
+    const host = load({
+      sdk: {
+        threads: {
+          ...idle,
+          list: (args) => {
+            reads += 1;
+            // The first read chooses; by the re-read the user has resumed it.
+            return reads <= 1 ? idle.list(args) : resumed.list(args);
+          },
+        },
+      },
+    });
+    await settleLongAgo(host, "thr_old");
+    reads = 0;
+
+    const result = (await host.harness.behavior.callRpc(
+      "runAutoArchive",
+      {},
+    )) as AutoArchiveSweepResult;
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
+    expect(result.skipped).toBe(1);
+  });
+
+  // bb's archive stops every run in the tree it takes, lifetime dependents
+  // and hidden spin-offs included, so work in any of them blocks it.
+  it("leaves a thread alone while a lifetime dependent works", async () => {
+    const host = load({
+      sdk: {
+        threads: liveThreads([
+          listRow({ id: "thr_old" }),
+          listRow({ id: "thr_owned", lifecycleOwnerThreadId: "thr_old", status: "active" }),
+        ]),
+      },
+    });
+    await settleLongAgo(host, "thr_old");
+
+    await host.harness.behavior.runSchedule("auto-archive");
+
+    expect(host.harness.inspection.sdk.callsTo("threads.archive")).toEqual([]);
   });
 
   it("leaves a thread that is working alone", async () => {
@@ -2149,10 +2305,9 @@ describe("reaping on settle", () => {
     expect(reapedMessage(host)).toBeUndefined();
   });
 
-  // A list bb will not give still leaves the thread the user actually
-  // settled. Its terminals are closed; with no environment to read, nothing
-  // is swept.
-  it("closes the thread's own terminals when the thread list cannot be read", async () => {
+  // Without the list there is no knowing which thread is running now, and
+  // nothing is closed or killed on a guess.
+  it("stops nothing when the thread list cannot be read", async () => {
     const base = reaping();
     const host = load({
       sdk: {
@@ -2168,8 +2323,137 @@ describe("reaping on settle", () => {
     });
     await settleAndReap(host);
 
-    expect(reapedMessage(host)?.reaped.terminalsClosed).toHaveLength(1);
+    expect(host.harness.inspection.sdk.callsTo("terminals.close")).toEqual([]);
     expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+  });
+
+  // The settled thread itself, resumed: its terminals serve the turn in
+  // flight and its worktree is in use. The server decides, not the sidebar.
+  it("spares a settled thread that is running again", async () => {
+    const host = load({
+      sdk: {
+        ...reaping(),
+        threads: liveThreads([
+          listRow({ id: "thr_done", status: "active", ...environments.env_wt }),
+        ]),
+      },
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(host.harness.inspection.sdk.callsTo("terminals.close")).toEqual([]);
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+    expect(reapedMessage(host)?.reaped.worktreesSkipped).toEqual([
+      { path: WORKTREE, reason: "in-use" },
+    ]);
+  });
+
+  // bb's archive takes a thread's lifetime dependents too; the reap walks
+  // the same tree, so a dependent running in the worktree protects it.
+  it("counts a running lifetime dependent as the worktree being in use", async () => {
+    const host = load({
+      sdk: {
+        ...reaping(),
+        threads: liveThreads([
+          listRow({ id: "thr_done", ...environments.env_wt }),
+          listRow({
+            id: "thr_owned",
+            status: "active",
+            lifecycleOwnerThreadId: "thr_done",
+            ...environments.env_wt,
+          }),
+        ]),
+      },
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+  });
+
+  it("stops nothing if the settle is undone during the in-use check", async () => {
+    let releaseEnvironment: () => void = () => {};
+    const base = liveThreads([listRow({ id: "thr_done", ...environments.env_wt })]);
+    const host = load({
+      sdk: {
+        ...reaping(),
+        threads: {
+          ...base,
+          list: (args) =>
+            args?.environmentId === undefined
+              ? base.list(args)
+              : (new Promise((resolve) => {
+                  releaseEnvironment = () => resolve(base.list(args));
+                }) as never),
+        },
+      },
+      experimental_callHostRpc: () => killedVite,
+    });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_done" });
+    await flushTasks();
+    await host.harness.behavior.callRpc("unsettle", { threadId: "thr_done" });
+    releaseEnvironment();
+    await flushTasks();
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+  });
+
+  it("reports a worktree with no machine on record as unreachable", async () => {
+    const host = load({
+      sdk: {
+        ...reaping(),
+        threads: liveThreads([
+          listRow({ id: "thr_done", ...environments.env_wt, environmentHostId: null }),
+        ]),
+      },
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(reapedMessage(host)?.reaped.worktreesSkipped).toEqual([
+      { path: WORKTREE, reason: "unreachable" },
+    ]);
+  });
+
+  // A call that ran out of time may already have killed something, so it is
+  // not reported as "nothing stopped".
+  it("reports a host that ran out of time as timed out, not unreachable", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = load({
+        sdk: reaping(),
+        experimental_callHostRpc: ({ signal }) =>
+          new Promise((_, reject) =>
+            signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+          ),
+      });
+      await host.harness.behavior.callRpc("settle", { threadId: "thr_done" });
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      expect(reapedMessage(host)?.reaped.worktreesSkipped).toEqual([
+        { path: WORKTREE, reason: "timed-out" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops a reap in flight when the plugin unloads", async () => {
+    const host = load({
+      sdk: reaping(),
+      experimental_callHostRpc: ({ signal }) =>
+        new Promise((_, reject) =>
+          signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+        ),
+    });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_done" });
+    await flushTasks();
+    const signal = host.harness.inspection.experimental_hostRpcCalls[0]?.signal;
+
+    await host.harness.lifecycle.dispose();
+    await flushTasks();
+
+    expect(signal?.aborted).toBe(true);
   });
 
   // The settle is the user's decision; cleanup is housekeeping that follows

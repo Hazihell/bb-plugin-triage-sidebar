@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  archiveTreeOf,
   buildThreadIndex,
   isThreadWorking,
   isTurnLive,
@@ -9,6 +10,9 @@ import {
 const thread = (overrides: Partial<IndexedThread> & { id: string }): IndexedThread => ({
   status: "idle",
   parentThreadId: null,
+  lifecycleOwnerThreadId: null,
+  sourceThreadId: null,
+  visibility: "visible",
   environmentId: null,
   environmentHostId: null,
   environmentPath: null,
@@ -75,14 +79,30 @@ describe("isThreadWorking", () => {
   });
 });
 
-describe("buildThreadIndex", () => {
-  it("answers lookups and children from one list", () => {
+describe("archiveTreeOf", () => {
+  // bb's archive walks three links, not one. A dependent the sweep did not
+  // see would be archived — and its run stopped — without being checked.
+  it("follows children, owned lifetimes and hidden spin-offs, deepest first", () => {
     const index = buildThreadIndex([
       thread({ id: "root" }),
       thread({ id: "kid", parentThreadId: "root" }),
+      thread({ id: "grandkid", parentThreadId: "kid" }),
+      thread({ id: "owned", lifecycleOwnerThreadId: "root" }),
+      thread({ id: "spinoff", sourceThreadId: "root", visibility: "hidden" }),
+      // A visible fork is the user's own thread, not something archive takes.
+      thread({ id: "fork", sourceThreadId: "root", visibility: "visible" }),
     ]);
-    expect(index.get("kid")?.parentThreadId).toBe("root");
-    expect(index.childrenOf("root").map((child) => child.id)).toEqual(["kid"]);
-    expect(index.childrenOf("kid")).toEqual([]);
+    const tree = archiveTreeOf(index, "root");
+    expect(new Set(tree)).toEqual(new Set(["root", "kid", "grandkid", "owned", "spinoff"]));
+    expect(tree.indexOf("grandkid")).toBeLessThan(tree.indexOf("kid"));
+    expect(tree.at(-1)).toBe("root");
+  });
+
+  it("survives a cycle", () => {
+    const index = buildThreadIndex([
+      thread({ id: "a", parentThreadId: "b" }),
+      thread({ id: "b", parentThreadId: "a" }),
+    ]);
+    expect(archiveTreeOf(index, "a").sort()).toEqual(["a", "b"]);
   });
 });

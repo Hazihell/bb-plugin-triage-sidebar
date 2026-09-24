@@ -15,6 +15,11 @@ export interface IndexedThread {
   status: string;
   runtime?: { displayStatus?: string };
   parentThreadId: string | null;
+  /** Set on a thread whose lifetime another thread owns; bb archives it along. */
+  lifecycleOwnerThreadId: string | null;
+  /** The thread this one was forked or spun off from. */
+  sourceThreadId: string | null;
+  visibility: string;
   environmentId: string | null;
   environmentHostId: string | null;
   environmentPath: string | null;
@@ -35,22 +40,60 @@ export interface IndexedThread {
 
 export interface ThreadIndex {
   get(threadId: string): IndexedThread | undefined;
-  childrenOf(threadId: string): readonly IndexedThread[];
+  /**
+   * Every thread bb's archive of this one takes with it, one level down: its
+   * children, the threads whose lifetime it owns, and the hidden threads spun
+   * off from it. The same three lists bb's own archive walks.
+   */
+  dependentsOf(threadId: string): readonly IndexedThread[];
 }
 
 export function buildThreadIndex(threads: readonly IndexedThread[]): ThreadIndex {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
-  const children = new Map<string, IndexedThread[]>();
+  const dependents = new Map<string, IndexedThread[]>();
+  const add = (ownerId: string | null, thread: IndexedThread) => {
+    if (ownerId === null || ownerId === thread.id) return;
+    const list = dependents.get(ownerId) ?? [];
+    if (!list.includes(thread)) list.push(thread);
+    dependents.set(ownerId, list);
+  };
   for (const thread of threads) {
-    if (thread.parentThreadId === null) continue;
-    const siblings = children.get(thread.parentThreadId) ?? [];
-    siblings.push(thread);
-    children.set(thread.parentThreadId, siblings);
+    add(thread.parentThreadId, thread);
+    add(thread.lifecycleOwnerThreadId, thread);
+    if (thread.visibility === "hidden") add(thread.sourceThreadId, thread);
   }
   return {
     get: (threadId) => byId.get(threadId),
-    childrenOf: (threadId) => children.get(threadId) ?? [],
+    dependentsOf: (threadId) => dependents.get(threadId) ?? [],
   };
+}
+
+/**
+ * The tree bb's archive of `rootThreadId` takes, deepest first, root last.
+ *
+ * Deepest first so a reap closes a child's terminals before its parent's.
+ * The visited set and depth bound are guards: a cycle or a runaway tree costs
+ * a bounded walk, never a hang.
+ */
+export function archiveTreeOf(
+  index: ThreadIndex,
+  rootThreadId: string,
+  maxDepth = 20,
+): string[] {
+  const seen = new Set<string>([rootThreadId]);
+  const walk = (threadId: string, depth: number): string[] => {
+    const order: string[] = [];
+    if (depth < maxDepth) {
+      for (const dependent of index.dependentsOf(threadId)) {
+        if (seen.has(dependent.id)) continue;
+        seen.add(dependent.id);
+        order.push(...walk(dependent.id, depth + 1));
+      }
+    }
+    order.push(threadId);
+    return order;
+  };
+  return walk(rootThreadId, 0);
 }
 
 const RUNNING_STATUSES = new Set(["active", "starting", "stopping", "provisioning"]);

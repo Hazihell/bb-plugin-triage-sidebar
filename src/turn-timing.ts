@@ -30,12 +30,14 @@ export interface TurnEventLog {
     types: readonly [TurnEventType, ...TurnEventType[]];
     order: "desc";
     limit: string;
+    signal?: AbortSignal;
   }): Promise<readonly TurnEventRow[]>;
   wait(args: {
     threadId: string;
     type: TurnEventType;
     afterSeq: string;
     waitMs: string;
+    signal?: AbortSignal;
   }): Promise<TurnEventRow | null>;
 }
 
@@ -44,12 +46,29 @@ export interface TurnTiming {
   startedWorkingAt: number | null;
   /** When the newest turn ended; null when no turn ever has. */
   lastRunEndedAt: number | null;
+  /**
+   * The sequence of the newest turn/started row known to belong to a turn
+   * that has stopped, or null when this read learned nothing new about it.
+   *
+   * A turn can stop without writing its completion. Its start row then sits
+   * on top of the log looking like a turn in flight, and the next turn's own
+   * start may land a moment after bb announces it. Remembering which start
+   * already stopped is what keeps a timer from counting from hours ago.
+   */
+  endedStartSeq: number | null;
 }
 
 /** The newest `turn/started` and `turn/completed` rows in a thread's log. */
 export interface NewestTurnRows {
   started: TurnEventRow | null;
   completed: TurnEventRow | null;
+}
+
+export interface ReadOptions {
+  /** The newest start row already known to have stopped, if any. */
+  endedStartSeq?: number | null;
+  waitMs?: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -73,23 +92,36 @@ export function isRunningStatus(status: string): boolean {
 }
 
 /**
+ * Whether the newest start row is a turn still in flight: newer than the
+ * newest completion, and newer than any start already known to have stopped.
+ * Rows are ordered by `seq`, not by `createdAt`: two rows written in the same
+ * millisecond still have a definite order in the log.
+ */
+export function isStartInFlight(
+  rows: NewestTurnRows,
+  endedStartSeq: number | null = null,
+): boolean {
+  const { started, completed } = rows;
+  if (started === null) return false;
+  return started.seq > Math.max(completed?.seq ?? -1, endedStartSeq ?? -1);
+}
+
+/**
  * The timing a pair of newest rows describes. Pure, so every rule about which
  * row wins is tested from plain values.
- *
- * Rows are ordered by `seq`, not by `createdAt`: two rows written in the same
- * millisecond still have a definite order in the log, and a turn that starts
- * in the same millisecond the previous one ended is still a new turn.
  */
 export function timingFromRows(
   rows: NewestTurnRows,
   running: boolean,
+  endedStartSeq: number | null = null,
 ): TurnTiming {
   const { started, completed } = rows;
-  const inFlight =
-    started !== null && (completed === null || started.seq > completed.seq);
+  const inFlight = isStartInFlight(rows, endedStartSeq);
   return {
-    startedWorkingAt: running && inFlight ? started.createdAt : null,
+    startedWorkingAt: running && inFlight && started ? started.createdAt : null,
     lastRunEndedAt: completed?.createdAt ?? null,
+    // Not running: whatever start is newest has stopped.
+    endedStartSeq: !running && started !== null ? started.seq : null,
   };
 }
 
@@ -103,12 +135,14 @@ export function timingFromRows(
 export async function readNewestTurnRows(
   log: TurnEventLog,
   threadId: string,
+  signal?: AbortSignal,
 ): Promise<NewestTurnRows> {
   const rows = await log.list({
     threadId,
     types: ["turn/started", "turn/completed"],
     order: "desc",
     limit: "2",
+    signal,
   });
   let started: TurnEventRow | null = null;
   let completed: TurnEventRow | null = null;
@@ -122,47 +156,67 @@ export async function readNewestTurnRows(
       types: ["turn/completed"],
       order: "desc",
       limit: "1",
+      signal,
     });
     completed = newest ?? null;
   }
   return { started, completed };
 }
 
-/** Timing for a thread in whatever state its log shows now. */
+/**
+ * Timing for a thread read without an event to go on — the startup backfill,
+ * an unarchive. The thread's status is asked for only when the log shows a
+ * turn in flight, and asked at that moment: a status read before the log was
+ * could say "running" about a turn the log has since finished.
+ */
 export async function readTurnTiming(
   log: TurnEventLog,
   threadId: string,
-  running: boolean,
+  readStatus: () => Promise<string>,
+  options: ReadOptions = {},
 ): Promise<TurnTiming> {
-  return timingFromRows(await readNewestTurnRows(log, threadId), running);
+  const endedStartSeq = options.endedStartSeq ?? null;
+  const rows = await readNewestTurnRows(log, threadId, options.signal);
+  const running = isStartInFlight(rows, endedStartSeq)
+    ? isRunningStatus(await readStatus())
+    : false;
+  return timingFromRows(rows, running, endedStartSeq);
 }
 
 /**
  * Timing for a thread bb has just reported as started.
  *
- * When the log does not yet show a turn in flight, its start row has not
- * landed; this waits for it rather than stamping the event's own arrival.
- * A start that never lands leaves the start unknown — no timer is better than
- * one counting from the wrong moment.
+ * When the log does not yet show a turn in flight — no start newer than the
+ * last completion and the last start known to have stopped — the new start
+ * row has not landed; this waits for it rather than stamping the event's own
+ * arrival. A start that never lands leaves the start unknown: no timer is
+ * better than one counting from the wrong moment.
  */
 export async function readStartedTiming(
   log: TurnEventLog,
   threadId: string,
-  waitMs = TURN_ROW_WAIT_MS,
+  options: ReadOptions = {},
 ): Promise<TurnTiming> {
-  const rows = await readNewestTurnRows(log, threadId);
-  const timing = timingFromRows(rows, true);
+  const endedStartSeq = options.endedStartSeq ?? null;
+  const rows = await readNewestTurnRows(log, threadId, options.signal);
+  const timing = timingFromRows(rows, true, endedStartSeq);
   if (timing.startedWorkingAt !== null) return timing;
-  const afterSeq = Math.max(rows.started?.seq ?? 0, rows.completed?.seq ?? 0);
+  const afterSeq = Math.max(
+    rows.started?.seq ?? 0,
+    rows.completed?.seq ?? 0,
+    endedStartSeq ?? 0,
+  );
   const next = await log.wait({
     threadId,
     type: "turn/started",
     afterSeq: String(afterSeq),
-    waitMs: String(waitMs),
+    waitMs: String(options.waitMs ?? TURN_ROW_WAIT_MS),
+    signal: options.signal,
   });
   return {
     startedWorkingAt: next?.createdAt ?? null,
     lastRunEndedAt: timing.lastRunEndedAt,
+    endedStartSeq: null,
   };
 }
 
@@ -173,27 +227,29 @@ export async function readStartedTiming(
  * still on its way, and the newest completion in the log belongs to the turn
  * before. Using it would make the idle age a whole turn too old, so this waits
  * for the real one. If it never arrives the previous end stands: it is the
- * newest end the log can prove.
+ * newest end the log can prove. Either way the start has now stopped.
  */
 export async function readStoppedTiming(
   log: TurnEventLog,
   threadId: string,
-  waitMs = TURN_ROW_WAIT_MS,
+  options: ReadOptions = {},
 ): Promise<TurnTiming> {
-  const rows = await readNewestTurnRows(log, threadId);
+  const rows = await readNewestTurnRows(log, threadId, options.signal);
   const { started, completed } = rows;
-  const pending =
-    started !== null && (completed === null || started.seq > completed.seq);
-  if (!pending) return timingFromRows(rows, false);
+  if (started === null || !isStartInFlight(rows, options.endedStartSeq ?? null)) {
+    return timingFromRows(rows, false);
+  }
   const next = await log.wait({
     threadId,
     type: "turn/completed",
     afterSeq: String(started.seq),
-    waitMs: String(waitMs),
+    waitMs: String(options.waitMs ?? TURN_ROW_WAIT_MS),
+    signal: options.signal,
   });
   return {
     startedWorkingAt: null,
     lastRunEndedAt: next?.createdAt ?? completed?.createdAt ?? null,
+    endedStartSeq: started.seq,
   };
 }
 

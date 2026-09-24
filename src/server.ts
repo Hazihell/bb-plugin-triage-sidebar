@@ -9,6 +9,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   resolveSettledSweepAction,
+  type SettledSweepAction,
   type ThreadActivitySignals,
 } from "./lifecycle";
 import {
@@ -17,6 +18,7 @@ import {
 } from "./project-avatar-store";
 import { hostContract } from "./host-contract";
 import {
+  archiveTreeOf,
   buildThreadIndex,
   isThreadWorking,
   isTurnLive,
@@ -25,15 +27,14 @@ import {
 } from "./thread-index";
 import {
   LIFECYCLE_CHANNEL,
-  type LifecycleReapedMessage,
   type LifecycleRowMessage,
 } from "./lifecycle-sync";
 import {
   forEachLimited,
-  isRunningStatus,
   readStartedTiming,
   readStoppedTiming,
   readTurnTiming,
+  type ReadOptions,
   type TurnEventLog,
   type TurnTiming,
 } from "./turn-timing";
@@ -107,6 +108,11 @@ const migrations = [
   // "how much of the agent's prompt-cache window is left", and updatedAt moves
   // for things that have nothing to do with a run.
   `ALTER TABLE thread_lifecycle ADD COLUMN last_run_ended_at INTEGER`,
+  // The sequence of the newest turn/started row known to belong to a turn
+  // that stopped. A turn that stops without writing its completion leaves a
+  // start on top of the log; this is what keeps the next turn's timer from
+  // counting from it. Internal: never sent to the sidebar.
+  `ALTER TABLE thread_lifecycle ADD COLUMN ended_start_seq INTEGER`,
 ];
 
 export interface StoredLifecycleRow {
@@ -180,7 +186,12 @@ const reapSummarySchema = z.object({
   ),
   processesFailed: z.number(),
   worktreesSkipped: z.array(
-    z.object({ path: z.string(), reason: z.enum(["in-use", "unreachable"]) }),
+    z.object({
+      path: z.string(),
+      // unreachable: the machine never answered, nothing was stopped there.
+      // timed-out: it answered too slowly; some processes may have stopped.
+      reason: z.enum(["in-use", "unreachable", "timed-out"]),
+    }),
   ),
 });
 
@@ -421,19 +432,7 @@ export interface AutoArchiveSweepResult {
  * counts: what failed is in the log, and there is nothing the user can do with
  * the identity of a terminal bb could not close.
  */
-export interface ReapSummary {
-  enabled: boolean;
-  terminalsClosed: Array<{ terminalId: string; title: string }>;
-  terminalsFailed: number;
-  processesKilled: Array<{ pid: number; command: string }>;
-  processesFailed: number;
-  /**
-   * Worktrees whose processes were deliberately left running, named because
-   * the user may expect them stopped: another thread is mid-turn there, or
-   * the machine holding it could not be reached.
-   */
-  worktreesSkipped: Array<{ path: string; reason: "in-use" | "unreachable" }>;
-}
+export type ReapSummary = z.infer<typeof reapSummarySchema>;
 
 export function emptyReapSummary(enabled: boolean): ReapSummary {
   return {
@@ -478,40 +477,6 @@ export function sweepThreadTitle(thread: {
   if (title) return title;
   const fallback = thread.titleFallback?.trim();
   return fallback ? fallback : "Untitled thread";
-}
-
-/**
- * A thread and its descendants, deepest first.
- *
- * The reap closes terminals in this order, so a parent's are never closed
- * while its children's are still running, and the sweep reads the same tree
- * to decide whether anything in it is still working.
- *
- * `listChildIds` is passed in rather than read from bb here so the order can
- * be tested without a server. `maxDepth` and the visited set are guards, not
- * policy: a cycle or a runaway tree should cost a bounded walk rather than
- * hang the caller.
- */
-export async function collectSubtreeDeepestFirst(
-  rootThreadId: string,
-  listChildIds: (parentThreadId: string) => Promise<string[]>,
-  maxDepth = 20,
-): Promise<string[]> {
-  const seen = new Set<string>([rootThreadId]);
-
-  const walk = async (threadId: string, depth: number): Promise<string[]> => {
-    if (depth >= maxDepth) return [threadId];
-    const order: string[] = [];
-    for (const childId of await listChildIds(threadId)) {
-      if (seen.has(childId)) continue;
-      seen.add(childId);
-      order.push(...(await walk(childId, depth + 1)));
-    }
-    order.push(threadId);
-    return order;
-  };
-
-  return walk(rootThreadId, 0);
 }
 
 export default function plugin(bb: BbPluginApi) {
@@ -576,42 +541,49 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
+  const LIFECYCLE_COLUMNS = `thread_id, settled_at, snoozed_until, snoozed_at,
+                             started_working_at, last_run_ended_at`;
+
+  const fromDbRow = (row: LifecycleDbRow): StoredLifecycleRow => ({
+    threadId: row.thread_id,
+    settledAt: row.settled_at,
+    snoozedUntil: row.snoozed_until,
+    snoozedAt: row.snoozed_at,
+    startedWorkingAt: row.started_working_at,
+    lastRunEndedAt: row.last_run_ended_at,
+  });
+
   const readAll = (): StoredLifecycleRow[] =>
     (
       db
-        .prepare(
-          `SELECT thread_id, settled_at, snoozed_until, snoozed_at,
-                  started_working_at, last_run_ended_at
-             FROM thread_lifecycle`,
-        )
+        .prepare(`SELECT ${LIFECYCLE_COLUMNS} FROM thread_lifecycle`)
         .all() as LifecycleDbRow[]
-    ).map((row) => ({
-      threadId: row.thread_id,
-      settledAt: row.settled_at,
-      snoozedUntil: row.snoozed_until,
-      snoozedAt: row.snoozed_at,
-      startedWorkingAt: row.started_working_at,
-      lastRunEndedAt: row.last_run_ended_at,
-    }));
+    ).map(fromDbRow);
 
   const readOne = (threadId: string): StoredLifecycleRow | undefined => {
     const row = db
-      .prepare(
-        `SELECT thread_id, settled_at, snoozed_until, snoozed_at,
-                started_working_at, last_run_ended_at
-           FROM thread_lifecycle WHERE thread_id = ?`,
-      )
+      .prepare(`SELECT ${LIFECYCLE_COLUMNS} FROM thread_lifecycle WHERE thread_id = ?`)
       .get(threadId) as LifecycleDbRow | undefined;
-    if (row === undefined) return undefined;
-    return {
-      threadId: row.thread_id,
-      settledAt: row.settled_at,
-      snoozedUntil: row.snoozed_until,
-      snoozedAt: row.snoozed_at,
-      startedWorkingAt: row.started_working_at,
-      lastRunEndedAt: row.last_run_ended_at,
-    };
+    return row === undefined ? undefined : fromDbRow(row);
   };
+
+  const readEndedStartSeq = (threadId: string): number | null =>
+    (
+      db
+        .prepare(`SELECT ended_start_seq FROM thread_lifecycle WHERE thread_id = ?`)
+        .get(threadId) as { ended_start_seq: number | null } | undefined
+    )?.ended_start_seq ?? null;
+
+  /**
+   * Aborted when the plugin unloads — disable, reload, uninstall. Every piece
+   * of work that outlives the call that started it (a log read waiting for
+   * its row, a reap, a host call) checks it before its next step and passes
+   * it to whatever it awaits, so nothing writes, publishes or kills on behalf
+   * of a plugin that is no longer running.
+   */
+  const lifetime = new AbortController();
+  bb.onDispose(() => lifetime.abort());
+  const unloaded = () => lifetime.signal.aborted;
 
   /**
    * Which run of this server numbered the changes, and how many it has
@@ -627,6 +599,7 @@ export default function plugin(bb: BbPluginApi) {
    * message always carries the committed state.
    */
   const publishRow = (threadId: string): void => {
+    if (unloaded()) return;
     seq += 1;
     const message: LifecycleRowMessage = {
       kind: "row",
@@ -647,7 +620,8 @@ export default function plugin(bb: BbPluginApi) {
            AND snoozed_until IS NULL
            AND snoozed_at IS NULL
            AND started_working_at IS NULL
-           AND last_run_ended_at IS NULL`,
+           AND last_run_ended_at IS NULL
+           AND ended_start_seq IS NULL`,
     ).run(threadId);
   };
 
@@ -689,41 +663,49 @@ export default function plugin(bb: BbPluginApi) {
   /**
    * Store a thread's turn timing as bb's event log reports it.
    *
-   * Kept apart from `write` because the two answer to different owners: the
-   * user parks a thread, bb decides when it runs, and neither may overwrite
-   * the other's columns. Timing upserts, so a thread with no parking state
-   * still gets a row — the idle age is read from it. A row left with nothing
-   * in it at all is deleted, so the table never fills with empty rows.
+   * Kept apart from `writeParking` because the two answer to different
+   * owners: the user parks a thread, bb decides when it runs, and neither may
+   * overwrite the other's columns. Timing upserts, so a thread with no parking
+   * state still gets a row — the idle age is read from it. A row left with
+   * nothing in it at all is deleted, so the table never fills with empty rows.
    *
-   * Publishes only a real change: the startup backfill rewrites every thread,
-   * and a sidebar refetching for values it already holds is pure noise.
+   * Publishes only a change the sidebar can see: the startup backfill
+   * rewrites every thread, and a message about values it already holds is
+   * pure noise.
    */
   const recordTiming = (threadId: string, timing: TurnTiming): void => {
     const before = readOne(threadId);
-    if (
+    const endedStartSeq = timing.endedStartSeq ?? readEndedStartSeq(threadId);
+    const visibleChange =
+      before === undefined
+        ? timing.startedWorkingAt !== null || timing.lastRunEndedAt !== null
+        : before.startedWorkingAt !== timing.startedWorkingAt ||
+          before.lastRunEndedAt !== timing.lastRunEndedAt;
+    const unchanged =
       before !== undefined &&
       before.startedWorkingAt === timing.startedWorkingAt &&
-      before.lastRunEndedAt === timing.lastRunEndedAt
-    ) {
-      return;
-    }
+      before.lastRunEndedAt === timing.lastRunEndedAt &&
+      endedStartSeq === readEndedStartSeq(threadId);
+    if (unchanged) return;
     if (
       before === undefined &&
       timing.startedWorkingAt === null &&
-      timing.lastRunEndedAt === null
+      timing.lastRunEndedAt === null &&
+      endedStartSeq === null
     ) {
       return;
     }
     db.prepare(
       `INSERT INTO thread_lifecycle
-         (thread_id, started_working_at, last_run_ended_at)
-         VALUES (?, ?, ?)
+         (thread_id, started_working_at, last_run_ended_at, ended_start_seq)
+         VALUES (?, ?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET
          started_working_at = excluded.started_working_at,
-         last_run_ended_at = excluded.last_run_ended_at`,
-    ).run(threadId, timing.startedWorkingAt, timing.lastRunEndedAt);
+         last_run_ended_at = excluded.last_run_ended_at,
+         ended_start_seq = excluded.ended_start_seq`,
+    ).run(threadId, timing.startedWorkingAt, timing.lastRunEndedAt, endedStartSeq);
     deleteIfEmpty(threadId);
-    publishRow(threadId);
+    if (visibleChange) publishRow(threadId);
   };
 
   /**
@@ -738,17 +720,27 @@ export default function plugin(bb: BbPluginApi) {
 
   const refreshTiming = async (
     threadId: string,
-    read: (log: TurnEventLog) => Promise<TurnTiming>,
+    read: (log: TurnEventLog, options: ReadOptions) => Promise<TurnTiming>,
     context: string,
+    { yieldToEvents = false }: { yieldToEvents?: boolean } = {},
   ): Promise<void> => {
+    if (unloaded()) return;
+    // A read without an event behind it — the backfill — never cancels one
+    // that has: the event's read knows what just happened, and the backfill
+    // only knows what the list said when it began.
+    if (yieldToEvents && timingGeneration.has(threadId)) return;
     timingTokens += 1;
     const generation = timingTokens;
     timingGeneration.set(threadId, generation);
     try {
-      const timing = await read(bb.sdk.threads.events);
-      if (timingGeneration.get(threadId) !== generation) return;
+      const timing = await read(bb.sdk.threads.events, {
+        endedStartSeq: readEndedStartSeq(threadId),
+        signal: lifetime.signal,
+      });
+      if (unloaded() || timingGeneration.get(threadId) !== generation) return;
       recordTiming(threadId, timing);
     } catch (error) {
+      if (unloaded()) return;
       // The cached value stays. It is the last one the log confirmed, and the
       // next event or startup backfill reads again.
       bb.log.warn(
@@ -768,13 +760,18 @@ export default function plugin(bb: BbPluginApi) {
    * the plugin was not listening has a cached end that is simply old, and only
    * the log can say so. Archived threads are skipped — they have no card.
    */
+  /** A thread's status as bb reports it now, for a read that needs it. */
+  const readStatus = (threadId: string) => async (): Promise<string> =>
+    (await bb.sdk.threads.get({ threadId })).status;
+
   const backfillTiming = async (): Promise<void> => {
     const threads = await listLiveThreads();
     await forEachLimited(threads, BACKFILL_CONCURRENCY, (thread) =>
       refreshTiming(
         thread.id,
-        (log) => readTurnTiming(log, thread.id, isRunningStatus(thread.status)),
+        (log, options) => readTurnTiming(log, thread.id, readStatus(thread.id), options),
         "startup",
+        { yieldToEvents: true },
       ),
     );
     bb.log.info(`turn timing: read ${threads.length} threads from the event log`);
@@ -815,9 +812,10 @@ export default function plugin(bb: BbPluginApi) {
       // it stands even if every part of the cleanup fails. Not awaited — the
       // outcome is published when it is known.
       void reapQuietly(threadId, "settle").then((reaped) => {
-        if (!reaped.enabled) return;
-        const message: LifecycleReapedMessage = { kind: "reaped", threadId, reaped };
-        bb.realtime.publish(LIFECYCLE_CHANNEL, message);
+        if (!reaped.enabled || unloaded()) return;
+        // The server's schema is the one source of this shape; the sidebar
+        // reads it through `parseLifecycleMessage`.
+        bb.realtime.publish(LIFECYCLE_CHANNEL, { kind: "reaped", threadId, reaped });
       });
       return { ok: true };
     },
@@ -897,7 +895,7 @@ export default function plugin(bb: BbPluginApi) {
   bb.events.on("thread.unarchived", ({ thread }) =>
     refreshTiming(
       thread.id,
-      (log) => readTurnTiming(log, thread.id, isRunningStatus(thread.status)),
+      (log, options) => readTurnTiming(log, thread.id, readStatus(thread.id), options),
       "thread.unarchived",
     ),
   );
@@ -907,14 +905,14 @@ export default function plugin(bb: BbPluginApi) {
   bb.events.on("thread.active", ({ thread }) =>
     refreshTiming(
       thread.id,
-      (log) => readStartedTiming(log, thread.id),
+      (log, options) => readStartedTiming(log, thread.id, options),
       "thread.active",
     ),
   );
   bb.events.on("thread.idle", ({ thread }) =>
     refreshTiming(
       thread.id,
-      (log) => readStoppedTiming(log, thread.id),
+      (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.idle",
     ),
   );
@@ -922,7 +920,7 @@ export default function plugin(bb: BbPluginApi) {
   bb.events.on("thread.failed", ({ thread }) =>
     refreshTiming(
       thread.id,
-      (log) => readStoppedTiming(log, thread.id),
+      (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.failed",
     ),
   );
@@ -982,44 +980,79 @@ export default function plugin(bb: BbPluginApi) {
     }
   };
 
-  const childIdsFrom =
-    (index: ThreadIndex) =>
-    async (parentThreadId: string): Promise<string[]> =>
-      index.childrenOf(parentThreadId).map((child) => child.id);
-
   const hostClient = bb.hosts.experimental_client({ contract: hostContract });
 
-  /** One worktree a subtree touches, and the machine that holds it. */
+  /** One worktree a tree touches, and the machine that holds it. */
   interface ReapTarget {
     environmentId: string;
-    hostId: string;
+    /** Null when bb has no machine on record for the environment. */
+    hostId: string | null;
     path: string;
   }
 
   /**
-   * Whether a thread outside the settled subtree is mid-turn in this
-   * environment. Its processes are indistinguishable from the settled
-   * thread's, and killing them under a running agent breaks work the user has
-   * not finished with. An unreadable list counts as in use.
+   * Whether any thread is mid-turn in this environment — the settled tree's
+   * own threads included. A settled thread the user has since resumed is
+   * running again, and its processes are indistinguishable from what its old
+   * turns left behind. An unreadable list counts as in use.
    */
-  const isEnvironmentInUse = async (
-    environmentId: string,
-    subtree: ReadonlySet<string>,
-  ): Promise<boolean> => {
+  const isEnvironmentInUse = async (environmentId: string): Promise<boolean> => {
     try {
       const threads = await bb.sdk.threads.list({
         environmentId,
         archived: false,
         includeHidden: true,
+        signal: lifetime.signal,
       });
-      return threads.some(
-        (thread) => !subtree.has(thread.id) && isTurnLive(thread),
-      );
+      return threads.some(isTurnLive);
     } catch (error) {
       bb.log.warn(
         `reap: could not list the threads of ${environmentId}, leaving it alone (${String(error)})`,
       );
       return true;
+    }
+  };
+
+  /**
+   * Ask the worktree's machine to sweep it, with a deadline this side owns.
+   *
+   * The deadline is ours rather than only the SDK's so a timeout can be told
+   * apart from a machine that never answered: a call that timed out may
+   * already have killed something, and "nothing stopped" would be a lie.
+   */
+  const callHostReap = async (
+    target: ReapTarget & { hostId: string },
+  ): Promise<
+    | { kind: "done"; report: { killed: ReapSummary["processesKilled"]; failed: number; refused: string | null } }
+    | { kind: "timed-out" | "unreachable" }
+  > => {
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), REAP_HOST_TIMEOUT_MS);
+    try {
+      const report = await hostClient.call(
+        "reapDirectory",
+        { directory: target.path },
+        {
+          hostId: target.hostId,
+          signal: AbortSignal.any([lifetime.signal, deadline.signal]),
+          // The SDK's own limit sits past ours, so ours always fires first.
+          timeoutMs: REAP_HOST_TIMEOUT_MS + 5_000,
+        },
+      );
+      return { kind: "done", report };
+    } catch (error) {
+      if (deadline.signal.aborted) {
+        bb.log.warn(`reap: host ${target.hostId} timed out sweeping ${target.path}; some processes may have stopped`);
+        return { kind: "timed-out" };
+      }
+      // No deferred retry: by the time the machine is back, the worktree may
+      // hold new work, and a kill queued now would land on it.
+      bb.log.warn(
+        `reap: could not reach host ${target.hostId} for ${target.path}, nothing stopped (${String(error)})`,
+      );
+      return { kind: "unreachable" };
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -1045,59 +1078,52 @@ export default function plugin(bb: BbPluginApi) {
    * Best-effort throughout. A terminal that will not close, a machine that
    * cannot be reached or a process that will not die is reported and skipped.
    */
-  const reapThreadSubtree = async (
-    rootThreadId: string,
-    knownIndex?: ThreadIndex,
-  ): Promise<ReapSummary> => {
+  const reapThreadSubtree = async (rootThreadId: string): Promise<ReapSummary> => {
     const values = await settings.get();
     if (values.reapOnSettle !== true) return emptyReapSummary(false);
-
-    // The sweep already holds a fresh index; a settle reads its own.
-    let index: ThreadIndex;
-    try {
-      index = knownIndex ?? buildThreadIndex(await listLiveThreads());
-    } catch (error) {
-      // Unlike the archive, which leaves an unreadable subtree entirely alone,
-      // a reap falls back to the one thread it was asked about. Archiving half
-      // a subtree releases the rest as orphan roots; reaping half of one just
-      // leaves the other half running, which is the state it was already in.
-      // With no list there is also no environment to read, so only the
-      // thread's terminals are closed.
-      bb.log.warn(
-        `reap: could not list threads, reaping ${rootThreadId}'s terminals alone (${String(error)})`,
-      );
-      index = buildThreadIndex([]);
-    }
-    const subtree = await collectSubtreeDeepestFirst(
-      rootThreadId,
-      childIdsFrom(index),
-    );
 
     const summary = emptyReapSummary(true);
     // Settle returns before the reap runs, so the user can take it back while
     // this is still working. Every destructive step asks first: an undone
-    // settle stops the reap where it stands.
-    const stillSettled = () => (readOne(rootThreadId)?.settledAt ?? null) !== null;
-    // One entry per environment, so a subtree sharing one worktree — the
-    // usual case — sweeps it once.
+    // settle, or an unloaded plugin, stops the reap where it stands.
+    const mayProceed = () =>
+      !unloaded() && (readOne(rootThreadId)?.settledAt ?? null) !== null;
+
+    // Read now, not handed in: whatever a caller read earlier may already be
+    // stale, and this read decides what gets killed.
+    let index: ThreadIndex;
+    try {
+      index = buildThreadIndex(await listLiveThreads());
+    } catch (error) {
+      // Nothing is closed or killed on a guess. Without the list there is no
+      // way to know which of these threads is running now.
+      bb.log.warn(
+        `reap: could not list threads, stopping nothing for ${rootThreadId} (${String(error)})`,
+      );
+      return summary;
+    }
+    // The same tree bb's archive would take: children, the threads whose
+    // lifetime this one owns, and the hidden threads spun off from it.
+    const tree = archiveTreeOf(index, rootThreadId);
+
+    // One entry per environment, so a tree sharing one worktree — the usual
+    // case — sweeps it once.
     const targets = new Map<string, ReapTarget>();
 
-    for (const threadId of subtree) {
-      if (!stillSettled()) return summary;
+    for (const threadId of tree) {
+      if (!mayProceed()) return summary;
       const thread = index.get(threadId);
       const path = thread?.environmentPath?.trim() ?? "";
-      if (
-        thread?.environmentId != null &&
-        thread.environmentHostId != null &&
-        thread.environmentIsWorktree === true &&
-        path !== ""
-      ) {
+      if (thread?.environmentId != null && thread.environmentIsWorktree === true && path !== "") {
         targets.set(thread.environmentId, {
           environmentId: thread.environmentId,
           hostId: thread.environmentHostId,
           path,
         });
       }
+      // A thread in the tree that is running again — resumed after the
+      // settle — keeps its terminals: they are serving the turn in flight.
+      if (thread === undefined || isTurnLive(thread)) continue;
 
       try {
         const { sessions } = await bb.sdk.terminals.list({
@@ -1107,6 +1133,7 @@ export default function plugin(bb: BbPluginApi) {
           // An already-exited session has nothing to close, and reporting it
           // as closed would credit this reap with a death it did not cause.
           if (session.status === "exited") continue;
+          if (!mayProceed()) return summary;
           try {
             await bb.sdk.terminals.close({
               terminalId: session.id,
@@ -1134,36 +1161,29 @@ export default function plugin(bb: BbPluginApi) {
       }
     }
 
-    const subtreeIds = new Set(subtree);
     for (const target of targets.values()) {
-      if (!stillSettled()) return summary;
-      if (await isEnvironmentInUse(target.environmentId, subtreeIds)) {
+      if (!mayProceed()) return summary;
+      if (target.hostId === null) {
+        bb.log.warn(`reap: no machine is recorded for ${target.path}, nothing stopped`);
+        summary.worktreesSkipped.push({ path: target.path, reason: "unreachable" });
+        continue;
+      }
+      if (await isEnvironmentInUse(target.environmentId)) {
         summary.worktreesSkipped.push({ path: target.path, reason: "in-use" });
         continue;
       }
-      try {
-        const report = await hostClient.call(
-          "reapDirectory",
-          { directory: target.path },
-          // The kill gives each process a grace period and re-checks for
-          // stragglers; the default 30s is too tight for a busy worktree.
-          { hostId: target.hostId, timeoutMs: REAP_HOST_TIMEOUT_MS },
-        );
-        if (report.refused !== null) {
-          bb.log.warn(`reap: host refused ${target.path} (${report.refused})`);
+      // Asked again after the in-use read: the user can undo while it runs.
+      if (!mayProceed()) return summary;
+      const outcome = await callHostReap({ ...target, hostId: target.hostId });
+      if (unloaded()) return summary;
+      if (outcome.kind === "done") {
+        if (outcome.report.refused !== null) {
+          bb.log.warn(`reap: host refused ${target.path} (${outcome.report.refused})`);
         }
-        summary.processesKilled.push(...report.killed);
-        summary.processesFailed += report.failed;
-      } catch (error) {
-        // No deferred retry: by the time the machine is back, the worktree
-        // may hold new work, and a kill queued now would land on it.
-        bb.log.warn(
-          `reap: could not reach host ${target.hostId} for ${target.path}, nothing stopped (${String(error)})`,
-        );
-        summary.worktreesSkipped.push({
-          path: target.path,
-          reason: "unreachable",
-        });
+        summary.processesKilled.push(...outcome.report.killed);
+        summary.processesFailed += outcome.report.failed;
+      } else {
+        summary.worktreesSkipped.push({ path: target.path, reason: outcome.kind });
       }
     }
 
@@ -1188,10 +1208,9 @@ export default function plugin(bb: BbPluginApi) {
   const reapQuietly = async (
     threadId: string,
     context: string,
-    index?: ThreadIndex,
   ): Promise<ReapSummary> => {
     try {
-      return await reapThreadSubtree(threadId, index);
+      return await reapThreadSubtree(threadId);
     } catch (error) {
       bb.log.warn(`${context}: reaping ${threadId} failed (${String(error)})`);
       return emptyReapSummary(true);
@@ -1219,6 +1238,54 @@ export default function plugin(bb: BbPluginApi) {
    * the retention period are the user's standing decision, and a button that
    * ignored them would archive threads the settings promise are safe.
    */
+  /**
+   * What the sweep should do with one settled candidate, judged from one read
+   * of bb's threads.
+   *
+   * Work anywhere in the tree bb's archive would take counts as work on this
+   * thread: archiving stops every run in it. That is wider than the sidebar's
+   * fold, which only follows parents, and deliberately so — the sidebar
+   * decides what to show, this decides what to stop.
+   */
+  const judgeCandidate = (
+    threadId: string,
+    index: ThreadIndex,
+  ):
+    | { kind: "no-row" }
+    | { kind: "gone" }
+    | { kind: "judged"; thread: IndexedThread; action: SettledSweepAction } => {
+    // Re-read rather than carried: the user can settle, snooze or unsettle
+    // while the sweep is awaiting bb.
+    const row = readOne(threadId);
+    if (row === undefined) return { kind: "no-row" };
+    const thread = index.get(threadId);
+    if (thread === undefined) return { kind: "gone" };
+    const isWorking = archiveTreeOf(index, threadId).some((id) => {
+      const member = index.get(id);
+      return member !== undefined && isThreadWorking(member);
+    });
+    const signals: ThreadActivitySignals = {
+      isWorking,
+      hasPendingInteraction: thread.hasPendingInteraction,
+      isUnread: thread.lastReadAt == null || thread.lastReadAt < thread.latestAttentionAt,
+      latestAttentionAt: thread.latestAttentionAt,
+    };
+    return {
+      kind: "judged",
+      thread,
+      action: resolveSettledSweepAction(row, signals, Date.now()),
+    };
+  };
+
+  /**
+   * The thread has spoken since the settle, so the sidebar is already showing
+   * it in the inbox. Clearing the stale parking state makes the two agree for
+   * good, instead of leaving a candidate the sweep has to talk itself out of
+   * again on every pass. The idle age stays.
+   */
+  const unsettleStale = (threadId: string): void =>
+    writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
+
   const runAutoArchiveSweep = async (): Promise<AutoArchiveSweepResult> => {
     // Read fresh rather than closing over a load-time snapshot: the user can
     // turn this off between two runs of the schedule.
@@ -1264,24 +1331,21 @@ export default function plugin(bb: BbPluginApi) {
     let descendants = 0;
 
     // One read of every live thread answers every question below — work,
-    // children, a waiting question, the environment — where the sweep used
-    // to make several round trips per candidate. A list that cannot be read
-    // fails the whole sweep: guessing would archive threads still in use, and
-    // the next tick tries again.
+    // the tree, a waiting question — where the sweep used to make several
+    // round trips per candidate. A list that cannot be read fails the whole
+    // sweep: guessing would archive threads still in use, and the next tick
+    // tries again.
     const index =
       candidates.length === 0 ? buildThreadIndex([]) : buildThreadIndex(await listLiveThreads());
 
     for (const threadId of candidates) {
-      // Re-read rather than carry the id's row from the query above: the user
-      // can settle, snooze or unsettle while this loop is awaiting bb.
-      const row = readOne(threadId);
-      if (row === undefined) {
+      if (unloaded()) break;
+      const first = judgeCandidate(threadId, index);
+      if (first.kind === "no-row") {
         forgotten += 1;
         continue;
       }
-
-      const thread = index.get(threadId);
-      if (thread === undefined) {
+      if (first.kind === "gone") {
         // Gone from bb, or already archived, so the row describes nothing.
         // Dropping it also stops this sweep from retrying the same dead id
         // on every pass.
@@ -1289,52 +1353,52 @@ export default function plugin(bb: BbPluginApi) {
         forgotten += 1;
         continue;
       }
-
-      // Leaves first, so the reap below walks the same tree the archive
-      // takes. Read from the index, so it cannot fail.
-      const subtree = await collectSubtreeDeepestFirst(threadId, childIdsFrom(index));
-
-      // Work anywhere below counts as work on this thread. The sidebar folds
-      // a child's work into its parent, and a grandchild's into its own
-      // parent, so the whole tree is what it shows as busy; and archiving
-      // takes the whole tree, running children included.
-      const isWorking = subtree.some((id) => {
-        const member = index.get(id);
-        return member !== undefined && isThreadWorking(member);
-      });
-      const latestAttentionAt = thread.latestAttentionAt;
-      const signals: ThreadActivitySignals = {
-        isWorking,
-        hasPendingInteraction: thread.hasPendingInteraction,
-        isUnread:
-          thread.lastReadAt == null || thread.lastReadAt < latestAttentionAt,
-        latestAttentionAt,
-      };
-
-      const action = resolveSettledSweepAction(row, signals, now);
-      if (action === "skip") {
+      if (first.action === "skip") {
         skipped += 1;
         continue;
       }
-      if (action === "unsettle") {
-        // The thread has spoken since the settle, so the sidebar is already
-        // showing it in the inbox. Clearing the stale row makes the two agree
-        // for good, instead of leaving a candidate this sweep has to talk
-        // itself out of again on every pass. The idle age stays.
-        writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
+      if (first.action === "unsettle") {
+        unsettleStale(threadId);
         unsettled += 1;
         continue;
       }
 
       // Before the archive, not after: an archived thread's worktree may be
       // retired by bb, and its terminals are no longer the thread's to close.
-      reaped = mergeReapSummaries(
-        reaped,
-        await reapQuietly(threadId, "auto-archive", index),
-      );
+      // The reap reads the tree afresh and spares anything running now.
+      reaped = mergeReapSummaries(reaped, await reapQuietly(threadId, "auto-archive"));
+
+      // Judged again from a fresh read, immediately before the archive. The
+      // first judgement is from the start of the sweep, and every earlier
+      // candidate's reap can have held it for up to a minute: long enough for
+      // the user to resume this thread, or for one of its dependents to start.
+      let fresh: ThreadIndex;
+      try {
+        fresh = buildThreadIndex(await listLiveThreads());
+      } catch (error) {
+        bb.log.warn(`auto-archive: could not re-read threads before archiving ${threadId}, leaving it (${String(error)})`);
+        failed += 1;
+        continue;
+      }
+      if (unloaded()) break;
+      const second = judgeCandidate(threadId, fresh);
+      if (second.kind !== "judged") {
+        forgotten += 1;
+        if (second.kind === "gone") clear(threadId);
+        continue;
+      }
+      if (second.action === "skip") {
+        skipped += 1;
+        continue;
+      }
+      if (second.action === "unsettle") {
+        unsettleStale(threadId);
+        unsettled += 1;
+        continue;
+      }
 
       // One call for the whole tree. bb archives a thread with every
-      // descendant, deepest first, so nothing is released as an orphan root.
+      // dependent, deepest first, so nothing is released as an orphan root.
       let archivedIds: string[];
       try {
         archivedIds = (await bb.sdk.threads.archive({ threadId })).archivedThreadIds;
@@ -1352,7 +1416,7 @@ export default function plugin(bb: BbPluginApi) {
       // depend on an event arriving first.
       for (const archivedId of new Set([threadId, ...archivedIds])) clear(archivedId);
       descendants += Math.max(0, archivedIds.length - 1);
-      archived.push({ threadId, title: sweepThreadTitle(thread) });
+      archived.push({ threadId, title: sweepThreadTitle(second.thread) });
     }
 
     // Stamped after the work, not before: a sweep that threw partway is not a

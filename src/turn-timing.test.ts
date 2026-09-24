@@ -3,6 +3,8 @@ import {
   forEachLimited,
   isRunningStatus,
   readNewestTurnRows,
+  readStartedTiming,
+  readTurnTiming,
   timingFromRows,
   type TurnEventLog,
   type TurnEventRow,
@@ -21,7 +23,7 @@ describe("timingFromRows", () => {
         { started: row(1, 10, "turn/started"), completed: row(2, 20, "turn/completed") },
         false,
       ),
-    ).toEqual({ startedWorkingAt: null, lastRunEndedAt: 20 });
+    ).toEqual({ startedWorkingAt: null, lastRunEndedAt: 20, endedStartSeq: 1 });
   });
 
   it("reads a running thread's start and its previous end", () => {
@@ -30,7 +32,7 @@ describe("timingFromRows", () => {
         { started: row(3, 30, "turn/started"), completed: row(2, 20, "turn/completed") },
         true,
       ),
-    ).toEqual({ startedWorkingAt: 30, lastRunEndedAt: 20 });
+    ).toEqual({ startedWorkingAt: 30, lastRunEndedAt: 20, endedStartSeq: null });
   });
 
   // Same millisecond, different turns: the sequence decides, not the clock.
@@ -48,7 +50,59 @@ describe("timingFromRows", () => {
   it("ignores an unfinished start on a thread that is not running", () => {
     expect(
       timingFromRows({ started: row(1, 10, "turn/started"), completed: null }, false),
-    ).toEqual({ startedWorkingAt: null, lastRunEndedAt: null });
+    ).toEqual({ startedWorkingAt: null, lastRunEndedAt: null, endedStartSeq: 1 });
+  });
+
+  // The start that already stopped is not the new turn's, whatever bb's
+  // status says: that start is hours old.
+  it("never reads a start known to have stopped as the turn in flight", () => {
+    expect(
+      timingFromRows({ started: row(7, 10, "turn/started"), completed: null }, true, 7)
+        .startedWorkingAt,
+    ).toBeNull();
+  });
+});
+
+describe("readStartedTiming", () => {
+  it("waits past a stopped start for the new turn's own row", async () => {
+    const waits: unknown[] = [];
+    const log: TurnEventLog = {
+      list: async () => [row(7, 10, "turn/started"), row(5, 5, "turn/completed")],
+      wait: async (args) => {
+        waits.push(args.afterSeq);
+        return row(9, 900, "turn/started");
+      },
+    };
+    const timing = await readStartedTiming(log, "thr", { endedStartSeq: 7 });
+    expect(waits).toEqual(["7"]);
+    expect(timing.startedWorkingAt).toBe(900);
+  });
+});
+
+describe("readTurnTiming", () => {
+  // The status is asked for only when the log shows a turn in flight, and at
+  // that moment — never taken from a list read before the log was.
+  it("asks for the status only when the log shows a turn in flight", async () => {
+    let asked = 0;
+    const status = async () => {
+      asked += 1;
+      return "idle";
+    };
+    const idleLog: TurnEventLog = {
+      list: async () => [row(2, 20, "turn/completed"), row(1, 10, "turn/started")],
+      wait: async () => null,
+    };
+    await readTurnTiming(idleLog, "thr", status);
+    expect(asked).toBe(0);
+
+    const openLog: TurnEventLog = {
+      list: async () => [row(3, 30, "turn/started"), row(2, 20, "turn/completed")],
+      wait: async () => null,
+    };
+    const timing = await readTurnTiming(openLog, "thr", status);
+    expect(asked).toBe(1);
+    // bb says idle now, so the open start lost its completion.
+    expect(timing).toEqual({ startedWorkingAt: null, lastRunEndedAt: 20, endedStartSeq: 3 });
   });
 });
 
