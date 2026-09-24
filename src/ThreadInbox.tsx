@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  experimental_useSidebarThreadActions as useSidebarThreadActions,
+  experimental_useProviders as useProviders,
   experimental_useSidebarThreads as useSidebarThreads,
   type PluginSidebarThread,
   type PluginThreadListProps,
@@ -26,7 +26,6 @@ import {
   filterByProject,
   hideChildrenOfVisibleParents,
   partitionPinned,
-  searchThreadsByTitle,
   sortByAttentionDescending,
   visibleInboxThreads,
 } from "./inbox";
@@ -41,17 +40,16 @@ const ALL_PROJECTS = "__all__";
  * noise, each moved row is tweened from where it was, so the user sees a
  * thread travel rather than a different list.
  *
- * The host owns the New-thread button and the search field above it, so this
- * ships neither. It filters by the `searchQuery` prop and keeps only the one
- * control the host has no equivalent for: the project scope picker.
+ * The host owns the New-thread button and thread search (the quick
+ * palette), so this ships neither. It keeps only the one control the host has
+ * no equivalent for: the project scope picker.
  */
 export function ThreadInbox({
   activeThreadId,
   onNavigate,
-  searchQuery,
 }: PluginThreadListProps) {
   const { status, threads, projects } = useSidebarThreads();
-  const actions = useSidebarThreadActions();
+  const { providers } = useProviders();
   const lifecycle = useLifecycle(threads);
   const avatars = useProjectAvatars();
   const cacheWindow = useCacheWindow();
@@ -79,10 +77,14 @@ export function ThreadInbox({
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects],
   );
+  const providerById = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider])),
+    [providers],
+  );
 
   // Counted over every thread the host reports, not the filtered list: the
   // children whose work this reports are exactly the rows the list has
-  // removed, and a project scope or a search must not make a parent look idle.
+  // removed, and a project scope must not make a parent look idle.
   const childWorkByParent = useMemo(() => {
     const counts = new Map<string, { running: number; needingYou: number }>();
     for (const thread of threads) {
@@ -106,10 +108,7 @@ export function ThreadInbox({
     );
     // Children live in their parent's header chip instead of the flat list;
     // an orphan whose parent is not on screen stays here.
-    const matched = searchThreadsByTitle(
-      hideChildrenOfVisibleParents(scoped),
-      searchQuery,
-    );
+    const matched = hideChildrenOfVisibleParents(scoped);
     const active: typeof matched = [];
     const onSnoozeShelf: typeof matched = [];
     const onSettledShelf: typeof matched = [];
@@ -129,7 +128,7 @@ export function ThreadInbox({
       snoozed: sortByAttentionDescending(onSnoozeShelf, lifecycle.isBusy),
       settled: sortByAttentionDescending(onSettledShelf, lifecycle.isBusy),
     };
-  }, [lifecycle, scope, searchQuery, threads]);
+  }, [lifecycle, scope, threads]);
 
   // One bundle per row, built where the lifecycle store lives. The card's
   // hover buttons and the menu's items then drive the same four calls, so the
@@ -152,6 +151,7 @@ export function ThreadInbox({
       thread={thread}
       projectName={projectNameById.get(thread.projectId) ?? null}
       projectAvatar={avatars.rows.get(thread.projectId)}
+      provider={providerById.get(thread.providerId) ?? null}
       isActive={thread.id === activeThreadId}
       park={parkFor(thread)}
       onNavigate={onNavigate}
@@ -242,7 +242,7 @@ export function ThreadInbox({
             role="status"
             className="px-2 py-6 text-center text-xs text-muted-foreground"
           >
-            {searchQuery.trim() ? "No threads found" : "No threads yet"}
+            No threads yet
           </p>
         ) : (
           <>

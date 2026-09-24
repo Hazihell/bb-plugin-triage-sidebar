@@ -849,9 +849,7 @@ export function createProjectAvatarStore(
 
       let project: SweepProjectView;
       try {
-        project = (await bb.sdk.projects.get({
-          projectId,
-        })) as SweepProjectView;
+        project = await bb.sdk.projects.get({ projectId });
       } catch (error) {
         bb.log.warn(
           `project-avatars: could not read project ${projectId} (${String(error)})`,
@@ -926,10 +924,8 @@ export function createProjectAvatarStore(
    */
   const readOwnHostId = async (): Promise<string | null> => {
     try {
-      const config = (await bb.sdk.system.config()) as {
-        primaryHostId?: string | null;
-      };
-      return config?.primaryHostId ?? null;
+      const config = await bb.sdk.system.config();
+      return config.primaryHostId ?? null;
     } catch (error) {
       bb.log.warn(
         `project-avatars: could not identify this machine, so no project folder is read (${String(error)})`,
@@ -958,7 +954,7 @@ export function createProjectAvatarStore(
 
     let projects: SweepProjectView[];
     try {
-      projects = (await bb.sdk.projects.list()) as SweepProjectView[];
+      projects = await bb.sdk.projects.list();
     } catch (error) {
       bb.log.warn(`project-avatars: could not list projects (${String(error)})`);
       return;

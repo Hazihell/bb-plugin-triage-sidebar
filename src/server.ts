@@ -901,9 +901,7 @@ export default function plugin(bb: BbPluginApi) {
         archived: false,
         includeHidden: true,
       });
-      return children.some((child) =>
-        isThreadWorking(child as SweepThreadView),
-      );
+      return children.some(isThreadWorking);
     } catch (error) {
       bb.log.warn(
         `auto-archive: could not read the children of ${parentThreadId}, leaving it alone (${String(error)})`,
@@ -1014,10 +1012,8 @@ export default function plugin(bb: BbPluginApi) {
 
     for (const threadId of subtree) {
       try {
-        const thread = (await bb.sdk.threads.get({ threadId })) as {
-          environmentId?: string | null;
-        } | null;
-        const environmentId = thread?.environmentId ?? null;
+        const thread = await bb.sdk.threads.get({ threadId });
+        const environmentId = thread.environmentId ?? null;
         if (environmentId !== null) {
           const environment = await bb.sdk.environments.get({
             environmentId,
@@ -1205,7 +1201,7 @@ export default function plugin(bb: BbPluginApi) {
 
       let thread: SweepThreadView | null;
       try {
-        thread = (await bb.sdk.threads.get({ threadId })) as SweepThreadView;
+        thread = await bb.sdk.threads.get({ threadId });
       } catch {
         // Gone from bb, so the row describes nothing. Dropping it also stops
         // this sweep from retrying the same dead id on every pass.

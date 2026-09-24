@@ -10,6 +10,8 @@ import {
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import { resolveSnoozePresets } from "./lifecycle";
+import type { ProviderRecord } from "./ProviderGlyph";
+import { sidebarThread, sidebarProject } from "./test-fixtures";
 
 // Load through the harness so the plugin's `@get-bb/plugin-sdk/app` import binds
 // to the test runtime; importing the component directly would bind it to an
@@ -17,41 +19,7 @@ import { resolveSnoozePresets } from "./lifecycle";
 const app = await loadPluginApp(() => import("../app"));
 const inbox = app.threadLists[0]!;
 
-function thread(
-  overrides: Partial<PluginSidebarThread> = {},
-): PluginSidebarThread {
-  return {
-    id: "thr_1",
-    projectId: "proj_1",
-    title: "A thread",
-    titleFallback: null,
-    parentThreadId: null,
-    sectionId: null,
-    originKind: null,
-    originPluginId: null,
-    providerId: "codex",
-    hasPendingInteraction: false,
-    activity: {
-      workflows: 0,
-      backgroundAgents: 0,
-      backgroundCommands: 0,
-      planMode: 0,
-      goals: 0,
-    },
-    indicator: "none",
-    indicatorLabel: null,
-    isUnread: false,
-    isPinned: false,
-    isArchived: false,
-    environment: null,
-    host: null,
-    createdAt: 100,
-    updatedAt: 100,
-    lastReadAt: 100,
-    latestAttentionAt: 100,
-    ...overrides,
-  };
-}
+const thread = sidebarThread;
 
 const listProps = {
   activeThreadId: null,
@@ -63,7 +31,7 @@ const listProps = {
 
 function render(
   threads: PluginSidebarThread[],
-  projects = [{ id: "proj_1", name: "bb", isPersonal: false }],
+  projects = [sidebarProject("proj_1", "bb")],
 ) {
   return renderSlot(inbox, listProps, {
     sidebarThreads: { status: "ready", threads, projects },
@@ -130,23 +98,25 @@ describe("ThreadInbox", () => {
         sidebarThreads: {
           status: "ready",
           threads: [thread({ id: "thr_open" })],
-          projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+          projects: [sidebarProject("proj_1", "bb")],
         },
         rpc: { listLifecycle: () => ({ rows: [] }) },
       },
     );
-    fireEvent.click(screen.getByRole("link"));
-    expect(rendered.sidebarActionCalls).toContainEqual({
-      method: "open",
-      threadId: "thr_open",
-      options: { split: false },
-    });
+    const link = screen.getByRole("link");
+    // A real link: the host routes the plain click in place, so the row lets
+    // it through rather than opening the thread itself.
+    expect(link.getAttribute("href")).toBe("/projects/proj_1/threads/thr_open");
+    expect(fireEvent.click(link)).toBe(true);
+    expect(rendered.sidebarActionCalls).toEqual([]);
     expect(navigated).toBe(1);
   });
 
   it("opens in a split with the platform modifier held", () => {
     const rendered = render([thread({ id: "thr_split" })]);
-    fireEvent.click(screen.getByRole("link"), { metaKey: true });
+    expect(fireEvent.click(screen.getByRole("link"), { metaKey: true })).toBe(
+      false,
+    );
     expect(rendered.sidebarActionCalls).toContainEqual({
       method: "open",
       threadId: "thr_split",
@@ -163,9 +133,9 @@ describe("ThreadInbox", () => {
     expect(within(pinned).getByText("Stuck")).toBeDefined();
   });
 
-  // The host owns the search field; the plugin only filters by what it is
-  // handed, so there is deliberately no second search box to type into.
-  it("filters by the host's search query", () => {
+  // Search moved to the host's quick palette, and the prop that carried the
+  // old field's text is always "". A stale value must not hide rows.
+  it("ignores the deprecated search query", () => {
     renderSlot(
       inbox,
       { ...listProps, searchQuery: "sidebar" },
@@ -176,13 +146,12 @@ describe("ThreadInbox", () => {
             thread({ id: "a", title: "Sidebar work" }),
             thread({ id: "b", title: "Something else" }),
           ],
-          projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+          projects: [sidebarProject("proj_1", "bb")],
         },
         rpc: { listLifecycle: () => ({ rows: [] }) },
       },
     );
-    expect(screen.getAllByRole("listitem")).toHaveLength(1);
-    expect(screen.getByText("Sidebar work")).toBeDefined();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
   });
 
   it("ships no search field of its own", () => {
@@ -202,8 +171,8 @@ describe("ThreadInbox", () => {
         thread({ id: "b", title: "In other", projectId: "proj_2" }),
       ],
       [
-        { id: "proj_1", name: "bb", isPersonal: false },
-        { id: "proj_2", name: "other", isPersonal: false },
+        sidebarProject("proj_1", "bb"),
+        sidebarProject("proj_2", "other"),
       ],
     );
     // Radix opens on keyboard too, which jsdom can drive without pointer
@@ -219,7 +188,7 @@ describe("ThreadInbox", () => {
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   });
 
-  it("reports an empty inbox and a fruitless search differently", () => {
+  it("reports an empty inbox", () => {
     render([]);
     expect(screen.getByText("No threads yet")).toBeDefined();
   });
@@ -231,7 +200,7 @@ describe("parking threads", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_done", title: "Finished work" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -273,7 +242,7 @@ describe("parking threads", () => {
             },
           }),
         ],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       // Settled in the store, but still working: it must stay visible.
       rpc: {
@@ -308,7 +277,7 @@ describe("parking threads", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_park", title: "Quiet" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({ rows: [] }),
@@ -328,7 +297,7 @@ describe("parking threads", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_snz", title: "Later" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -358,7 +327,7 @@ describe("working duration", () => {
         threads: [
           thread({ id: "thr_run", title: "Running", indicator: "runtime" }),
         ],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -399,7 +368,7 @@ describe("working duration", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_idle", title: "Idle" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -513,7 +482,7 @@ describe("the cache window", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_idle", title: "Idle" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -574,7 +543,7 @@ describe("the cache window", () => {
         threads: [
           thread({ id: "thr_idle", title: "Idle", updatedAt: minuteBoundary }),
         ],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -629,7 +598,7 @@ describe("row context menu", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_park", title: "Park me" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({ rows: [] }),
@@ -653,7 +622,7 @@ describe("row context menu", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_snz", title: "Later please" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({ rows: [] }),
@@ -698,7 +667,7 @@ describe("row context menu", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_done", title: "Filed away" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -737,7 +706,7 @@ describe("row context menu", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_snz", title: "Sleeping" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
         listLifecycle: () => ({
@@ -810,9 +779,30 @@ describe("row context menu", () => {
 });
 
 describe("card metadata", () => {
-  it("always shows the provider glyph, even without a branch", async () => {
-    render([thread({ id: "thr_p", providerId: "claude-code" })]);
-    expect(await screen.findByLabelText("Claude Code")).toBeDefined();
+  it("draws the provider with bb's artwork and name", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_p", providerId: "claude-code" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      // Only the fields the glyph reads; the directory record is far wider.
+      providers: {
+        status: "ready",
+        providers: [
+          {
+            id: "claude-code",
+            displayName: "Claude Code",
+            logoUrl: "/logos/claude.svg",
+          } as ProviderRecord,
+        ],
+      },
+      rpc: { listLifecycle: () => ({ rows: [] }) },
+    });
+    const glyph = await screen.findByLabelText("Claude Code");
+    const icon = glyph.querySelector("[data-provider-id]");
+    expect(icon?.getAttribute("data-provider-kind")).toBe("agent");
+    expect(icon?.getAttribute("data-provider-logo")).toBe("/logos/claude.svg");
   });
 
   it("falls back to a neutral glyph for an unknown provider", async () => {
@@ -841,7 +831,10 @@ describe("card metadata", () => {
           id: "env_1",
           name: "Worktree",
           branchName: "bb/feature",
-          workspaceDisplayKind: "managed-worktree",
+          path: "/work/bb-feature",
+          isWorktree: true,
+          providerId: null,
+          workspaceDisplayKind: null,
         },
       }),
     ]);
@@ -895,6 +888,8 @@ describe("attention states", () => {
     ["waiting-for-input", "Thread needs user input"],
     ["unread-error", "Unread thread failed"],
     ["unread-success", "Unread thread succeeded"],
+    ["queued-failed", "Queued message failed to send"],
+    ["queued-waiting", "Thread has a message waiting to send"],
   ] as const;
 
   for (const [indicator, label] of states) {
@@ -931,13 +926,96 @@ describe("attention states", () => {
   });
 });
 
+// The host never reports a draft in `indicator`; the row reads this client's
+// composer and folds it in.
+describe("unsent drafts", () => {
+  function renderWithDraft(row: PluginSidebarThread) {
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [row],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarDraftThreadIds: [row.id],
+      rpc: { listLifecycle: () => ({ rows: [] }) },
+    });
+  }
+
+  it("shows the pencil on a quiet thread", async () => {
+    renderWithDraft(thread({ id: "thr_d" }));
+    expect(
+      await screen.findByLabelText("Thread has unsubmitted draft"),
+    ).toBeDefined();
+  });
+
+  it("shows the working pencil while the thread runs", async () => {
+    renderWithDraft(
+      thread({
+        id: "thr_wd",
+        indicator: "runtime",
+        indicatorLabel: "Thread working",
+      }),
+    );
+    expect(
+      await screen.findByLabelText("Thread working with unsubmitted draft"),
+    ).toBeDefined();
+    expect(screen.queryByLabelText("Thread working")).toBeNull();
+  });
+
+  it("never hides a thread that is waiting on you", async () => {
+    renderWithDraft(
+      thread({
+        id: "thr_wait",
+        hasPendingInteraction: true,
+        indicator: "waiting-for-input",
+        indicatorLabel: "Thread needs user input",
+      }),
+    );
+    expect(await screen.findByLabelText("Thread needs user input")).toBeDefined();
+    expect(screen.queryByLabelText("Thread has unsubmitted draft")).toBeNull();
+  });
+});
+
+describe("jump shortcuts", () => {
+  it("shows the key bb assigned in place of the status while held", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({
+            id: "thr_k",
+            indicator: "unread-success",
+            indicatorLabel: "Unread thread succeeded",
+          }),
+        ],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarShortcuts: { thr_k: { label: "⌘1", ariaKeyshortcuts: "Meta+1" } },
+      rpc: { listLifecycle: () => ({ rows: [] }) },
+    });
+    expect(await screen.findByText("⌘1")).toBeDefined();
+    expect(screen.queryByLabelText("Unread thread succeeded")).toBeNull();
+    expect(screen.getByRole("link").getAttribute("aria-keyshortcuts")).toBe(
+      "Meta+1",
+    );
+  });
+
+  it("shows no key when the modifier is up", () => {
+    render([thread({ id: "thr_k" })]);
+    expect(
+      screen.getByRole("link").hasAttribute("aria-keyshortcuts"),
+    ).toBe(false);
+    expect(document.querySelector("kbd")).toBeNull();
+  });
+});
+
 describe("pull request badge", () => {
   const withPr = (attention: string, state = "open") =>
     renderSlot(inbox, listProps, {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "thr_pr" })],
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: { listLifecycle: () => ({ rows: [] }) },
       sidebarPullRequests: {
@@ -986,7 +1064,7 @@ describe("project avatars in the list", () => {
       sidebarThreads: {
         status: "ready",
         threads: [thread({ id: "a", projectId: "prj_1" })],
-        projects: [{ id: "prj_1", name: "my cool app", isPersonal: false }],
+        projects: [sidebarProject("prj_1", "my cool app")],
       },
       rpc: {
         listLifecycle: () => ({ rows: [] }),

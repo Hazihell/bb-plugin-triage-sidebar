@@ -10,6 +10,7 @@ import {
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { StoredAvatarRow } from "./server";
 import { avatarBackground } from "./project-avatar";
+import { sidebarProject } from "./test-fixtures";
 
 // Loaded through the harness for the same reason the sidebar tests are: the
 // plugin's `@get-bb/plugin-sdk/app` import binds at module evaluation.
@@ -17,8 +18,8 @@ const app = await loadPluginApp(() => import("../app"));
 const section = app.settingsSections.find((s) => s.id === "project-avatars")!;
 
 const PROJECTS = [
-  { id: "prj_1", name: "my cool app", isPersonal: false },
-  { id: "prj_2", name: "captouro", isPersonal: false },
+  sidebarProject("prj_1", "my cool app"),
+  sidebarProject("prj_2", "captouro"),
 ];
 
 function row(overrides: Partial<StoredAvatarRow> = {}): StoredAvatarRow {

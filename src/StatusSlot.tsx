@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
-import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
-import { StatusGlyph, hasStatusGlyph, WAITING_COLOR } from "./StatusGlyph";
+import {
+  useSidebarThreadDraft,
+  type PluginSidebarThread,
+} from "@get-bb/plugin-sdk/app";
+import {
+  composeIndicator,
+  DRAFT_INDICATOR_LABELS,
+  StatusGlyph,
+  hasStatusGlyph,
+  WAITING_COLOR,
+} from "./StatusGlyph";
 import { isWorking } from "./useLifecycle";
 import { elapsedLabel, idleAgeLabel } from "./relative-time";
 import { cn } from "./lib/utils";
@@ -99,6 +108,16 @@ export function StatusOrTime({
   const isOwnRunLive = isWorking(thread);
   const isRunning = startedWorkingAt !== null && isOwnRunLive;
   const liveNow = useSecondsClock(isRunning);
+  const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
+  const indicator = composeIndicator(
+    thread.indicator,
+    hasUnsubmittedDraft,
+    isOwnRunLive,
+  );
+  const indicatorLabel =
+    indicator === "draft" || indicator === "working-draft"
+      ? DRAFT_INDICATOR_LABELS[indicator]
+      : thread.indicatorLabel;
 
   if (isOwnRunLive) {
     const clock = Math.max(liveNow, now);
@@ -108,10 +127,8 @@ export function StatusOrTime({
             as a workflow; the runtime spinner otherwise, because something is
             running and the slot must say so. */}
         <StatusGlyph
-          indicator={
-            hasStatusGlyph(thread.indicator) ? thread.indicator : "runtime"
-          }
-          label={thread.indicatorLabel}
+          indicator={hasStatusGlyph(indicator) ? indicator : "runtime"}
+          label={indicatorLabel}
         />
         {/* No idle age here, ever, even when the store has no start time: this
             thread is not idle, and its clock is simply unknown. */}
@@ -128,8 +145,8 @@ export function StatusOrTime({
   const age = idleAgeLabel(idleSince, now);
   return (
     <span className="flex items-center gap-1">
-      {hasStatusGlyph(thread.indicator) ? (
-        <StatusGlyph indicator={thread.indicator} label={thread.indicatorLabel} />
+      {hasStatusGlyph(indicator) ? (
+        <StatusGlyph indicator={indicator} label={indicatorLabel} />
       ) : isChildWorking ? (
         // The thread is quiet and its children are not. The spinner is the
         // sidebar's word for "something is running", and the flat list has

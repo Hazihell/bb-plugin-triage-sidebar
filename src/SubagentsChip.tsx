@@ -8,7 +8,7 @@ import {
 import { cn } from "./lib/utils";
 import { Disc } from "./Disc";
 import { StatusGlyph } from "./StatusGlyph";
-import { childrenOf, threadDisplayTitle } from "./inbox";
+import { childrenOf } from "./inbox";
 
 const MAX_DISCS = 3;
 
@@ -85,7 +85,7 @@ export function SubagentsChip({
                     <Disc thread={child} />
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-xs">
-                        {threadDisplayTitle(child)}
+                        {child.displayTitle}
                       </span>
                       <span className="truncate text-2xs text-muted-foreground">
                         {child.originKind ?? "thread"}

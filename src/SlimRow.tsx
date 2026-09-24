@@ -1,12 +1,14 @@
 import {
-  experimental_useSidebarThreadActions as useSidebarThreadActions,
+  experimental_useSidebarThreadSplit as useSidebarThreadSplit,
+  ThreadTitle,
+  useSidebarThreadShortcut,
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { Icon } from "./components/Icon";
 import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
-import { threadDisplayTitle } from "./inbox";
+import { ShortcutPill, ThreadRowLink } from "./ThreadRowLink";
 import { snoozeWakeLabel } from "./lifecycle";
 
 /**
@@ -36,8 +38,8 @@ export function SlimRow({
   onNavigate: () => void;
   onRestore: () => void;
 }) {
-  const actions = useSidebarThreadActions();
-  const title = threadDisplayTitle(thread);
+  const split = useSidebarThreadSplit(thread.id);
+  const shortcut = useSidebarThreadShortcut(thread.id);
 
   return (
     <RowContextMenu thread={thread} park={park}>
@@ -48,19 +50,11 @@ export function SlimRow({
             isActive ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60",
           )}
         >
-          <a
-            data-sidebar-thread-shortcut-target=""
-            data-sidebar-thread-id={thread.id}
-            href="#"
-            aria-label={title}
-            onClick={(event) => {
-              event.preventDefault();
-              actions.open(thread.id, {
-                split: event.metaKey || event.ctrlKey,
-              });
-              onNavigate();
-            }}
-            className="absolute inset-0 cursor-pointer rounded-md"
+          <ThreadRowLink
+            thread={thread}
+            split={split}
+            shortcut={shortcut}
+            onNavigate={onNavigate}
           />
           <span
             className={cn(
@@ -69,7 +63,7 @@ export function SlimRow({
               "group-hover/slim:text-foreground",
             )}
           >
-            {title}
+            <ThreadTitle threadId={thread.id} />
           </span>
           {/* The same slot as a card, so a shelf keeps the card's column. A
               snoozed row spends it on the wake time: when the thread comes
@@ -87,7 +81,9 @@ export function SlimRow({
             )}
           >
             <span className="flex items-center group-hover/slim:opacity-0">
-              {shelf === "snoozed" && wakeAt !== null ? (
+              {shortcut !== null ? (
+                <ShortcutPill shortcut={shortcut} />
+              ) : shelf === "snoozed" && wakeAt !== null ? (
                 snoozeWakeLabel(wakeAt, now)
               ) : (
                 <StatusOrTime thread={thread} now={now} />

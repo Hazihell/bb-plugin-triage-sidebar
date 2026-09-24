@@ -17,6 +17,39 @@ import { cn } from "./lib/utils";
  */
 
 /**
+ * The host's indicator with this client's unsent draft folded in.
+ *
+ * bb never reports a draft in `indicator`: a draft lives in one client's
+ * composer, and the thread array is the same for every client. So the row
+ * composes it here, with bb's own precedence. A thread blocked on you or
+ * failed still says so. A working thread with a draft becomes
+ * "working-draft", which outranks every other kind of work. A quiet thread
+ * shows the draft only when bb has nothing else to say, so an unread result
+ * or a queued message is never hidden behind a pencil.
+ */
+export function composeIndicator(
+  indicator: PluginSidebarThreadIndicator,
+  hasUnsubmittedDraft: boolean,
+  isOwnWorkLive: boolean,
+): PluginSidebarThreadIndicator {
+  if (!hasUnsubmittedDraft) return indicator;
+  if (indicator === "unread-error" || indicator === "waiting-for-input") {
+    return indicator;
+  }
+  if (isOwnWorkLive) return "working-draft";
+  return indicator === "none" ? "draft" : indicator;
+}
+
+/**
+ * Accessible names for the two kinds {@link composeIndicator} adds. The host
+ * labels only what it reports, so these copy bb's own wording for them.
+ */
+export const DRAFT_INDICATOR_LABELS = {
+  draft: "Thread has unsubmitted draft",
+  "working-draft": "Thread working with unsubmitted draft",
+} as const;
+
+/**
  * Colour carries the state, so a glance at the column answers "what does this
  * list want from me" before any icon is read: blue is the machine working,
  * green is a finished turn, red is a failure, amber is the one state that is
@@ -49,7 +82,9 @@ export function hasStatusGlyph(
 ): boolean {
   switch (indicator) {
     case "unread-error":
+    case "queued-failed":
     case "waiting-for-input":
+    case "queued-waiting":
     case "unread-success":
     case "runtime":
     case "workflow":
@@ -79,6 +114,9 @@ export function StatusGlyph({
 
   switch (indicator) {
     case "unread-error":
+    // A message that never sent is a failure the user has to act on, so it
+    // takes the failure glyph, as it does in bb's list.
+    case "queued-failed":
       return (
         <Icon
           name="CircleX"
@@ -94,6 +132,16 @@ export function StatusGlyph({
           name="CircleQuestion"
           aria-label={aria}
           className={cn(shared, WAITING_COLOR)}
+        />
+      );
+    case "queued-waiting":
+      // Neutral, not amber: the message will send by itself when the turn
+      // ends, so nothing here is waiting on the human.
+      return (
+        <Icon
+          name="Clock"
+          aria-label={aria}
+          className={cn(shared, "text-muted-foreground/75")}
         />
       );
     case "runtime":
@@ -150,12 +198,22 @@ export function StatusGlyph({
         />
       );
     case "draft":
-    case "working-draft":
       return (
         <Icon
           name="Edit"
           aria-label={aria}
           className={cn(shared, "text-muted-foreground")}
+        />
+      );
+    case "working-draft":
+      // The pencil in the live-work colour: the draft is yours, the run is
+      // the machine's, and the row has to say both.
+      return (
+        <ShineIcon
+          name="Edit"
+          label={aria}
+          color={LIVE_WORK_COLOR}
+          className={shared}
         />
       );
     case "unread-success":
@@ -183,7 +241,13 @@ function ShineIcon({
   color,
   className,
 }: {
-  name: "Workflow" | "UserRoundPlus" | "Terminal" | "ListTodo" | "Target";
+  name:
+    | "Workflow"
+    | "UserRoundPlus"
+    | "Terminal"
+    | "ListTodo"
+    | "Target"
+    | "Edit";
   label: string | undefined;
   color: string;
   className: string;

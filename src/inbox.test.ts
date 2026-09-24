@@ -6,47 +6,12 @@ import {
   hideChildrenOfVisibleParents,
   parentOf,
   partitionPinned,
-  searchThreadsByTitle,
   sortByAttentionDescending,
-  threadDisplayTitle,
   visibleInboxThreads,
 } from "./inbox";
+import { sidebarThread } from "./test-fixtures";
 
-function thread(
-  overrides: Partial<PluginSidebarThread> = {},
-): PluginSidebarThread {
-  return {
-    id: "thr_1",
-    projectId: "proj_1",
-    title: "A thread",
-    titleFallback: null,
-    parentThreadId: null,
-    sectionId: null,
-    originKind: null,
-    originPluginId: null,
-    providerId: "codex",
-    hasPendingInteraction: false,
-    activity: {
-      workflows: 0,
-      backgroundAgents: 0,
-      backgroundCommands: 0,
-      planMode: 0,
-      goals: 0,
-    },
-    indicator: "none",
-    indicatorLabel: null,
-    isUnread: false,
-    isPinned: false,
-    isArchived: false,
-    environment: null,
-    host: null,
-    createdAt: 100,
-    updatedAt: 100,
-    lastReadAt: 100,
-    latestAttentionAt: 100,
-    ...overrides,
-  };
-}
+const thread = sidebarThread;
 
 describe("sortByAttentionDescending", () => {
   it("puts the most recently needed thread first", () => {
@@ -155,43 +120,6 @@ describe("sortByAttentionDescending", () => {
     ];
     sortByAttentionDescending(input);
     expect(input.map((t) => t.id)).toEqual(["a", "b"]);
-  });
-});
-
-describe("threadDisplayTitle", () => {
-  it("prefers the title, then the fallback, then a placeholder", () => {
-    expect(threadDisplayTitle(thread({ title: "Real" }))).toBe("Real");
-    expect(
-      threadDisplayTitle(thread({ title: null, titleFallback: "Fallback" })),
-    ).toBe("Fallback");
-    expect(
-      threadDisplayTitle(thread({ title: null, titleFallback: null })),
-    ).toBe("Untitled thread");
-  });
-
-  it("treats a whitespace-only title as absent", () => {
-    expect(
-      threadDisplayTitle(thread({ title: "   ", titleFallback: "Fallback" })),
-    ).toBe("Fallback");
-  });
-});
-
-describe("searchThreadsByTitle", () => {
-  it("matches case-insensitively on the visible title", () => {
-    const threads = [
-      thread({ id: "a", title: "Sidebar work" }),
-      thread({ id: "b", title: "Something else" }),
-      thread({ id: "c", title: null, titleFallback: "sidebar fallback" }),
-    ];
-    expect(searchThreadsByTitle(threads, "SIDEBAR").map((t) => t.id)).toEqual([
-      "a",
-      "c",
-    ]);
-  });
-
-  it("returns everything for a blank query", () => {
-    const threads = [thread({ id: "a" }), thread({ id: "b" })];
-    expect(searchThreadsByTitle(threads, "   ")).toHaveLength(2);
   });
 });
 

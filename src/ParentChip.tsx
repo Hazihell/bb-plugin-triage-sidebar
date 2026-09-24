@@ -6,7 +6,7 @@ import {
 import { Icon } from "./components/Icon";
 import { cn } from "./lib/utils";
 import { Disc } from "./Disc";
-import { parentOf, threadDisplayTitle } from "./inbox";
+import { parentOf } from "./inbox";
 
 /**
  * The way back out of a child thread.
@@ -26,7 +26,7 @@ export function ParentChip({
   const parent = parentOf(threads, threadId);
   if (parent === null) return null;
 
-  const title = threadDisplayTitle(parent);
+  const title = parent.displayTitle;
 
   return (
     <button

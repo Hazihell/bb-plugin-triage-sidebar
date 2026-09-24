@@ -26,8 +26,7 @@ export function isWorking(thread: PluginSidebarThread): boolean {
     activity.backgroundCommands > 0 ||
     activity.planMode > 0 ||
     activity.goals > 0 ||
-    thread.indicator === "runtime" ||
-    thread.indicator === "working-draft"
+    thread.indicator === "runtime"
   );
 }
 

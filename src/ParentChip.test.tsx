@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
+import { sidebarThread, sidebarProject } from "./test-fixtures";
 
 // Load through the harness so the plugin's `@get-bb/plugin-sdk/app` import binds
 // to the test runtime.
@@ -11,41 +12,7 @@ const parentChip = app.threadHeaderActions.find(
   (slot) => slot.id === "parent",
 )!;
 
-function thread(
-  overrides: Partial<PluginSidebarThread> = {},
-): PluginSidebarThread {
-  return {
-    id: "thr_1",
-    projectId: "proj_1",
-    title: "A thread",
-    titleFallback: null,
-    parentThreadId: null,
-    sectionId: null,
-    originKind: null,
-    originPluginId: null,
-    providerId: "codex",
-    hasPendingInteraction: false,
-    activity: {
-      workflows: 0,
-      backgroundAgents: 0,
-      backgroundCommands: 0,
-      planMode: 0,
-      goals: 0,
-    },
-    indicator: "none",
-    indicatorLabel: null,
-    isUnread: false,
-    isPinned: false,
-    isArchived: false,
-    environment: null,
-    host: null,
-    createdAt: 100,
-    updatedAt: 100,
-    lastReadAt: 100,
-    latestAttentionAt: 100,
-    ...overrides,
-  };
-}
+const thread = sidebarThread;
 
 function render(
   threads: PluginSidebarThread[],
@@ -59,7 +26,7 @@ function render(
       sidebarThreads: {
         status: "ready",
         threads,
-        projects: [{ id: "proj_1", name: "bb", isPersonal: false }],
+        projects: [sidebarProject("proj_1", "bb")],
       },
     },
   );

@@ -56,25 +56,6 @@ function attentionTier<T extends AttentionRanked>(
   return isBusy(thread) ? 1 : 0;
 }
 
-export function threadDisplayTitle(thread: PluginSidebarThread): string {
-  const title = thread.title?.trim();
-  if (title) return title;
-  const fallback = thread.titleFallback?.trim();
-  return fallback ? fallback : "Untitled thread";
-}
-
-/** Substring match on the visible title only, preserving the incoming order. */
-export function searchThreadsByTitle(
-  threads: readonly PluginSidebarThread[],
-  query: string,
-): PluginSidebarThread[] {
-  const normalized = query.trim().toLowerCase();
-  if (normalized.length === 0) return [...threads];
-  return threads.filter((thread) =>
-    threadDisplayTitle(thread).toLowerCase().includes(normalized),
-  );
-}
-
 export interface ProjectScope {
   /** Project id, or null for "all projects". */
   id: string | null;

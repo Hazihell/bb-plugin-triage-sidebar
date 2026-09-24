@@ -1,7 +1,8 @@
 import {
   experimental_useSidebarThreadPullRequest as useSidebarThreadPullRequest,
   experimental_useSidebarThreadSplit as useSidebarThreadSplit,
-  experimental_useSidebarThreadActions as useSidebarThreadActions,
+  ThreadTitle,
+  useSidebarThreadShortcut,
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { Icon, type IconName } from "./components/Icon";
@@ -9,11 +10,11 @@ import { ProjectAvatar } from "./ProjectAvatar";
 import type { StoredProjectAvatar } from "./project-avatar";
 import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
-import { ProviderGlyph } from "./ProviderGlyph";
+import { ProviderGlyph, type ProviderRecord } from "./ProviderGlyph";
+import { ShortcutPill, ThreadRowLink } from "./ThreadRowLink";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { WAITING_COLOR } from "./StatusGlyph";
 import type { CacheWindow } from "./cache-window";
-import { threadDisplayTitle } from "./inbox";
 import { resolveSnoozePresets } from "./lifecycle";
 
 /**
@@ -29,6 +30,7 @@ export function ThreadCard({
   thread,
   projectName,
   projectAvatar,
+  provider,
   isActive,
   park,
   onNavigate,
@@ -42,6 +44,11 @@ export function ThreadCard({
   projectName: string | null;
   /** This project's stored avatar, or undefined for a generated monogram. */
   projectAvatar?: StoredProjectAvatar;
+  /**
+   * This thread's agent provider from bb's directory, or null while the
+   * directory loads or when it does not list the provider.
+   */
+  provider: ProviderRecord | null;
   isActive: boolean;
   /**
    * Parking, for both surfaces that offer it: the hover buttons below and the
@@ -75,8 +82,8 @@ export function ThreadCard({
   /** Quantized clock, so every card in one render agrees on "now". */
   now: number;
 }) {
-  const actions = useSidebarThreadActions();
-  const { splitProps, layout } = useSidebarThreadSplit(thread.id);
+  const split = useSidebarThreadSplit(thread.id);
+  const shortcut = useSidebarThreadShortcut(thread.id);
   // Opt-in per row: this costs a git-host lookup, and threads sharing a
   // worktree share one.
   const { pullRequest } = useSidebarThreadPullRequest(thread.id);
@@ -90,24 +97,14 @@ export function ThreadCard({
             isActive ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60",
             // A thread open in another pane gets a weaker tint than the active
             // row, so the two states stay distinguishable.
-            !isActive && layout !== null && "bg-sidebar-accent/30",
+            !isActive && split.layout !== null && "bg-sidebar-accent/30",
           )}
         >
-          <a
-            // Both attributes, or bb's nine thread shortcuts stop finding rows.
-            data-sidebar-thread-shortcut-target=""
-            data-sidebar-thread-id={thread.id}
-            href="#"
-            aria-label={threadDisplayTitle(thread)}
-            {...splitProps}
-            onClick={(event) => {
-              event.preventDefault();
-              actions.open(thread.id, {
-                split: event.metaKey || event.ctrlKey,
-              });
-              onNavigate();
-            }}
-            className="absolute inset-0 cursor-pointer rounded-md"
+          <ThreadRowLink
+            thread={thread}
+            split={split}
+            shortcut={shortcut}
+            onNavigate={onNavigate}
           />
           <div className="pointer-events-none relative flex h-5 items-center gap-1.5">
             {/* Grouping, not labelling: the name is right there in words, and
@@ -126,7 +123,7 @@ export function ThreadCard({
             </span>
             {/* Status at rest, park actions on hover. Only the status yields,
                 so the project name never shifts. */}
-            {park.canPark ? (
+            {park.canPark && shortcut === null ? (
               <span className="pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex">
                 <ParkButton
                   label="Snooze until tomorrow"
@@ -147,17 +144,21 @@ export function ThreadCard({
             <span
               className={cn(
                 STATUS_SLOT_CLASS,
-                park.canPark && "group-hover/card:hidden",
+                park.canPark && shortcut === null && "group-hover/card:hidden",
               )}
             >
-              <StatusOrTime
-                thread={thread}
-                now={now}
-                startedWorkingAt={startedWorkingAt}
-                lastRunEndedAt={lastRunEndedAt}
-                isChildWorking={childWork.running > 0}
-                cacheWindow={cacheWindow}
-              />
+              {shortcut !== null ? (
+                <ShortcutPill shortcut={shortcut} />
+              ) : (
+                <StatusOrTime
+                  thread={thread}
+                  now={now}
+                  startedWorkingAt={startedWorkingAt}
+                  lastRunEndedAt={lastRunEndedAt}
+                  isChildWorking={childWork.running > 0}
+                  cacheWindow={cacheWindow}
+                />
+              )}
             </span>
           </div>
           <div
@@ -169,7 +170,9 @@ export function ThreadCard({
               thread.isUnread && "font-medium",
             )}
           >
-            {threadDisplayTitle(thread)}
+            {/* bb's own title: the resolved text with mention chips drawn
+                inline, clipped by this line's truncation. */}
+            <ThreadTitle threadId={thread.id} />
           </div>
           <div className="pointer-events-none relative mt-0.5 flex h-4 items-center gap-1.5 text-2xs text-muted-foreground">
             {/* A thread without a worktree still runs somewhere, so the
@@ -241,7 +244,10 @@ export function ThreadCard({
               </a>
             ) : null}
             {/* Always drawn, so the line has a fixed right edge. */}
-            <ProviderGlyph providerId={thread.providerId} />
+            <ProviderGlyph
+              providerId={thread.providerId}
+              provider={provider}
+            />
           </div>
         </div>
       </li>
