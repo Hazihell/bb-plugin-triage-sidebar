@@ -33,6 +33,25 @@ describe("snapshot store", () => {
     expect(store.read()).toEqual([{ id: "a", at: 1 }]);
   });
 
+  // iOS often backgrounds a page without firing pagehide.
+  it("writes at once when the page turns hidden", () => {
+    const store = createSnapshotStore<{ id: string; at: number | null }>(
+      "t2b",
+      schema,
+    );
+    store.schedule(() => [{ id: "a", at: 1 }]);
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    expect(store.read()).toEqual([{ id: "a", at: 1 }]);
+  });
+
   it("keeps only the schema's fields", () => {
     const store = createSnapshotStore<object>("t3", schema);
     store.schedule(() => [{ id: "a", at: 1, extra: "x".repeat(100) }]);

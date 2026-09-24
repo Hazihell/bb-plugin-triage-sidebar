@@ -25,15 +25,20 @@ const REVEAL = {
  * the actions, so they are always drawn, spaced for a finger.
  */
 const ALWAYS_ON_TOUCH =
-  "[@media(hover:none)]:not-sr-only [@media(hover:none)]:flex [@media(hover:none)]:gap-2.5";
+  "[@media(hover:none)]:not-sr-only [@media(hover:none)]:flex [@media(hover:none)]:gap-3";
 
 /**
  * One row action button. On touch its hit area reaches past the glyph —
- * about 30 by 34 pixels — through an invisible pseudo-element, so the target
- * grows without the line, and so the card, growing with it.
+ * 30 by 26 pixels — through an invisible pseudo-element, so the target grows
+ * without the line, and so the card, growing with it.
+ *
+ * It grows up into the card's top padding and sideways into the gap, never
+ * down: below the button is the title, and a tap near a long title's end must
+ * open the thread, not settle it. Sideways it takes 6px, exactly half the
+ * 12px gap, so neighbouring targets meet without overlapping.
  */
 export const ROW_ACTION_BUTTON_CLASS =
-  "relative cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring [@media(hover:none)]:after:absolute [@media(hover:none)]:after:-inset-x-1.5 [@media(hover:none)]:after:-inset-y-2 [@media(hover:none)]:after:content-['']";
+  "relative cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring [@media(hover:none)]:after:absolute [@media(hover:none)]:after:-inset-x-1.5 [@media(hover:none)]:after:-top-2 [@media(hover:none)]:after:bottom-0 [@media(hover:none)]:after:content-['']";
 
 /** An action whose menu is open stays drawn, whatever else is going on. */
 const WHILE_MENU_OPEN =

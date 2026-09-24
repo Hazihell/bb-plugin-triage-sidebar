@@ -17,7 +17,8 @@
  * - The key carries a fingerprint of that schema, so a build whose rows have a
  *   different shape never reads an older build's, and a write clears the
  *   older keys it replaces.
- * - Writes are coalesced to one per second, plus one when the page is hidden,
+ * - Writes are coalesced to one per second, plus one when the page is hidden
+ *   or closed,
  *   because the stores change on every turn of every thread.
  * - A write that fails (quota, private mode) removes the key rather than
  *   leaving an older snapshot behind, so the next launch shows the skeleton
@@ -82,8 +83,13 @@ export function createSnapshotStore<Row extends object>(
     }
   };
 
+  // Both, because iOS often backgrounds or closes a page without firing
+  // pagehide; the page turning hidden is the last moment it reliably reports.
   if (typeof window !== "undefined") {
     window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
   }
 
   return {
