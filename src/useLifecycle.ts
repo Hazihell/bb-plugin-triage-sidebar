@@ -130,6 +130,9 @@ export interface LifecycleApi {
    * is the real list; the server's replace them as soon as they arrive.
    */
   source: LifecycleSource;
+  /** Why the last read failed, while `status` is "error"; null otherwise. */
+  error: string | null;
+  /** Read the store again; `status` is "loading" until it answers. */
   retry(): void;
   shelfFor(thread: PluginSidebarThread): ThreadShelf;
   canPark(thread: PluginSidebarThread): boolean;
@@ -184,6 +187,7 @@ export function useLifecycle(
   const [seed] = useState(readLifecycleSnapshot);
   const [sync, setSync] = useState<SyncState | null>(seed);
   const [status, setStatus] = useState<LifecycleLoadStatus>("loading");
+  const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<LifecycleSource>(
     seed === null ? "none" : "snapshot",
   );
@@ -211,14 +215,13 @@ export function useLifecycle(
     let snapshot: LifecycleSnapshot;
     try {
       snapshot = await rpc.call("listLifecycle", {});
-    } catch (error) {
+    } catch (failure) {
       if (id !== readSeq.current) return;
       buffer.current = null;
+      // Shown by the list itself, with a Retry, rather than toasted: a toast
+      // fades while the list goes on being wrong.
+      setError(errorMessage(failure));
       setStatus("error");
-      toast.error("Couldn't load the triage sidebar", {
-        description: errorMessage(error),
-        action: { label: "Retry", onClick: () => void resync() },
-      });
       return;
     }
     if (id !== readSeq.current) return;
@@ -226,6 +229,7 @@ export function useLifecycle(
     buffer.current = null;
     const { state, stale } = stateFromSnapshotAndBuffer(snapshot, buffered);
     commit(state);
+    setError(null);
     setStatus("ready");
     setSource("live");
     // A gap among the buffered messages: one was lost in flight.
@@ -348,7 +352,11 @@ export function useLifecycle(
     return {
       status,
       source,
-      retry: () => void resync(),
+      error,
+      retry: () => {
+        setStatus("loading");
+        void resync();
+      },
       shelfFor: (thread) =>
         resolveShelf(rows.get(thread.id), signalsFor(thread), now),
       canPark: (thread) => canPark(signalsFor(thread)),
@@ -392,7 +400,7 @@ export function useLifecycle(
           "Couldn't wake the thread",
         ),
     };
-  }, [commit, now, resync, rows, rpc, source, status, threads]);
+  }, [commit, error, now, resync, rows, rpc, source, status, threads]);
 }
 
 const EMPTY_ROWS: ReadonlyMap<string, ThreadLifecycleRow> = new Map();

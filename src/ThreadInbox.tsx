@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useProviders as useProviders,
   experimental_useSidebarThreads as useSidebarThreads,
@@ -19,6 +19,7 @@ import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { isWorking, useLifecycle } from "./useLifecycle";
 import { useCacheWindow } from "./useCacheWindow";
+import { useClock } from "./clock";
 import type { CacheWindow } from "./cache-window";
 import { useProjectAvatars } from "./useProjectAvatars";
 import { ProjectAvatar } from "./ProjectAvatar";
@@ -31,7 +32,7 @@ import {
   visibleInboxThreads,
 } from "./inbox";
 import { useFlipReorder } from "./useFlipReorder";
-import { ListSkeleton } from "./ListStates";
+import { ListEmpty, ListError, ListSkeleton, StaleNotice } from "./ListStates";
 import { holdOrder, OrderHoldContext, useOrderFreeze } from "./useOrderFreeze";
 
 const ALL_PROJECTS = "__all__";
@@ -62,17 +63,7 @@ export function ThreadInbox({
   const [scope, setScope] = useState<string>(ALL_PROJECTS);
   // One clock for every card in a render, quantized to the minute so the
   // labels do not disagree and do not churn on unrelated re-renders.
-  const [nowMinute, setNowMinute] = useState(() =>
-    Math.floor(Date.now() / 60_000),
-  );
-  useEffect(() => {
-    const timer = setInterval(
-      () => setNowMinute(Math.floor(Date.now() / 60_000)),
-      60_000,
-    );
-    return () => clearInterval(timer);
-  }, []);
-  const now = nowMinute * 60_000;
+  const now = useClock("minute");
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [showSettled, setShowSettled] = useState(false);
 
@@ -275,22 +266,25 @@ export function ThreadInbox({
         (lifecycle.source === "none" && lifecycle.status === "loading") ? (
           <ListSkeleton />
         ) : status === "error" ? (
-          <p
-            role="status"
-            className="px-2 py-6 text-center text-xs text-muted-foreground"
-          >
-            Could not load threads.
-          </p>
+          <ListError title="Couldn't load threads" detail={null} />
+        ) : lifecycle.source === "none" ? (
+          // Never the threads unshelved: without the store, settled threads
+          // would sit in the inbox as if they needed the user.
+          <ListError
+            title="Couldn't load snoozed and settled threads"
+            detail={lifecycle.error}
+            onRetry={lifecycle.retry}
+          />
         ) : pinned.length + inbox.length + snoozed.length + settled.length ===
           0 ? (
-          <p
-            role="status"
-            className="px-2 py-6 text-center text-xs text-muted-foreground"
-          >
-            No threads yet
-          </p>
+          <ListEmpty
+            scopeName={scope === ALL_PROJECTS ? null : scopeLabel}
+          />
         ) : (
           <>
+            {lifecycle.status === "error" ? (
+              <StaleNotice onRetry={lifecycle.retry} />
+            ) : null}
             {pinned.length > 0 ? (
               <Shelf label="Pinned">
                 {pinned.map(renderCard)}

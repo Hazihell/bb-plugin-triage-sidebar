@@ -106,7 +106,9 @@ describe("lifecycle sync", () => {
     await waitFor(() => expect(listCalls(rendered)).toHaveLength(2));
   });
 
-  it("tells the user when the first read fails, and retries on request", async () => {
+  // In the list, not a toast: a toast fades while the list goes on being
+  // wrong, and without the store the list cannot shelve anything.
+  it("shows a failed first read in place of the list, with a retry", async () => {
     let fail = true;
     const rendered = renderInbox({
       listLifecycle: () => {
@@ -114,16 +116,34 @@ describe("lifecycle sync", () => {
         return { epoch: "e1", seq: 0, rows: [] };
       },
     });
-    await waitFor(() => expect(toasts.toast.error).toHaveBeenCalledTimes(1));
-    const [, options] = toasts.toast.error.mock.calls[0] as [
-      string,
-      { action: { onClick: () => void } },
-    ];
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("backend down");
+    expect(screen.queryByText("Alpha")).toBeNull();
+    expect(toasts.toast.error).not.toHaveBeenCalled();
 
     fail = false;
-    options.action.onClick();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     await waitFor(() => expect(listCalls(rendered)).toHaveLength(2));
+    expect(await screen.findByText("Alpha")).toBeDefined();
+  });
+
+  // With last session's shelves on screen the list is still mostly right, so
+  // it stays, and one line says the shelves may be stale.
+  it("keeps a snapshot on screen when the read fails, and says so", async () => {
+    localStorage.setItem(
+      "bb-plugin:triage-sidebar:lifecycle:v1",
+      JSON.stringify({ epoch: "old", seq: 0, rows: [] }),
+    );
+    renderInbox({
+      listLifecycle: () => {
+        throw new Error("backend down");
+      },
+    });
+    expect(
+      await screen.findByText(/Snoozed and settled may be out of date/),
+    ).toBeDefined();
+    expect(screen.getByText("Alpha")).toBeDefined();
   });
 });
 

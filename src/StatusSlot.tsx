@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { useClock } from "./clock";
 import {
   experimental_Icon as HostIcon,
   useSidebarThreadDraft,
@@ -21,26 +22,6 @@ import {
   isCacheWarning,
   type CacheWindow,
 } from "./cache-window";
-
-/**
- * A one-second clock, live only while `enabled`.
- *
- * The list's shared clock ticks once a minute, which is right for ages and
- * wrong for a running timer: a run that started eight seconds ago would read
- * the same for its first full minute. This ticker is deliberately local to the
- * rows that need it, so a sidebar with one working thread re-renders one row a
- * second rather than all of them.
- */
-function useSecondsClock(enabled: boolean): number {
-  const [tick, setTick] = useState(() => Date.now());
-  useEffect(() => {
-    if (!enabled) return;
-    setTick(Date.now());
-    const timer = setInterval(() => setTick(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [enabled]);
-  return tick;
-}
 
 /**
  * The row's trailing slot: one fixed width, right-aligned, on every row.
@@ -113,7 +94,9 @@ export function StatusOrTime({
   cacheWindow?: CacheWindow;
 }) {
   const isRunning = isTurnRunning(thread);
-  const liveNow = useSecondsClock(isRunning && startedWorkingAt !== null);
+  // Seconds only while there is a run to count: the list's shared clock then
+  // wakes this row once a second, and every other row keeps to the minute.
+  const liveNow = useClock("second", isRunning && startedWorkingAt !== null);
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
   const rowStatus = useSidebarThreadRowStatus(thread.id);
   // Another plugin's row status goes exactly where bb puts it: in the draft
