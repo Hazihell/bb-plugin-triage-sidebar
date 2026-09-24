@@ -4,7 +4,8 @@ An inbox-style replacement for bb's sidebar thread list, built around triage:
 the threads that need you rise to the top, and the ones you are done with
 fade out on their own.
 
-Install it from a local checkout:
+It needs bb 0.43.4 or later, and is built against plugin SDK 0.5.9. Install it
+from a local checkout:
 
 ```sh
 bb plugin install . --yes
@@ -13,8 +14,9 @@ bb plugin install . --yes
 Turn it on in **Settings > Appearance > Sidebar**. bb's own list stays the
 default, and comes back the moment you switch away or disable this plugin.
 
-The plugin replaces the scrolling list only. bb's New-thread button, search
-field, plugin nav rows, and footer stay exactly where they are.
+The plugin replaces the scrolling list only. bb's New-thread button, its
+search (the quick palette), plugin nav rows, and footer stay exactly where they
+are. The list has no search of its own, and filters nothing by text.
 
 ## Where this came from
 
@@ -49,55 +51,99 @@ for an answer beats every timestamp. Status still lives inside each card as
 well: the position says what to look at, the card says why.
 
 Movement that the user cannot follow would be worse than no ranking at all, so
-two rules govern it. The list freezes its order while your pointer is over it
-or a row inside it holds keyboard focus — no row may slide out from under a
-cursor on its way to a click, and none may move a focused row somewhere else.
-Threads that arrive during a freeze are slotted into the order you are looking
-at rather than re-sorting it. And when the list does re-sort, each moved row is
-animated from where it was to where it now belongs, so you see a thread travel
-instead of a different list. A reduced-motion preference turns the animation
-off; the ordering is unchanged.
+two rules govern it. The list freezes its order while your pointer is over it,
+a row holds keyboard focus, or a menu opened from a row is still open — no row
+may slide out from under a cursor on its way to a click. During a freeze a row
+you settle or archive leaves at once, and a thread that arrives (a snooze that
+woke, a new thread) waits at the end of its shelf. When the freeze lifts, a
+moment after the pointer leaves, each row that changed rank slides once, over
+150ms, from where it was to where it now belongs, so you see a thread travel
+instead of a different list. Data arriving never slides anything: not the
+first load, not a snapshot being replaced by live data, not a project switch.
+A reduced-motion preference makes every move instant; the ordering is
+unchanged.
 
 Three shelves:
 
-- **Inbox** — three-line cards: the project's avatar and name, then one
-  fixed-width status slot, on the first line; title on the second; then branch
-  (or the machine, when a thread has no worktree), activity counts, the
-  pull-request number, and the agent glyph. Pinned threads sit above.
+- **Inbox** — three-line cards: the project's avatar and name, then the
+  status slot, on the first line; title on the second; then branch (or the
+  machine, when a thread has no worktree), activity counts, the pull-request
+  number, and the agent's glyph. Pinned threads sit above.
 
-  One slot, one width, so the whole column lines up. Glyph on the left, clock
-  on the right: the glyph says what state the thread is in, and the clock says
-  how long it has been in it. A thread whose own run is live shows its spinner
-  and a live seconds timer. Every other row shows its idle age — how long the
-  agent has been quiet — beside whatever glyph it has, or on its own when it
-  has none. Hovering a card that can be parked replaces the status with a
-  snooze and a settle button; only the status yields, so the project name never
-  shifts.
+  The status slot is one fixed width on every row, with a glyph column and a
+  time column, so both line up down the list. **The time is always shown;
+  nothing ever takes its place.** While the agent is inside a turn — bb's
+  status says it is starting, active or stopping — it counts that turn's
+  seconds. Otherwise it is the idle age: how long since the last turn ended.
+  Background work is not a turn: a thread whose dev server, workflow, plan or
+  goal is still running keeps its idle age, with that work's glyph beside it.
+  A thread that has never finished a turn shows the time since bb last saw
+  activity on it, dimmed and never amber, because it is not a cache clock. For
+  the few seconds after a reload before a running turn's start is read, the
+  time is a dash.
 
-  The glyphs are bb's own: the red circle-x for a failure, the circle-question
-  for a raised hand, the spinner for live work, and a blue notification dot for
-  a thread that finished while you were not looking. Both lists sit in the same
-  window, so they speak one language.
+  Two things sit just left of the slot and never in it. While you hold the
+  command key, bb's jump key for the row. On hover or keyboard focus, a card
+  that can be parked shows **Snooze**, which opens a menu of presets, and
+  **Settle**.
 
-- **Snoozed** — hidden until a wake time you chose. A snoozed thread comes
-  back early if it starts working or asks you something.
-- **Settled** — work you are done with, collapsed to one line each.
+  The glyphs are bb's own, so the two lists speak one language: the red
+  circle-x for a failure or a message that failed to send, the amber
+  circle-question for a raised hand, the spinner for a running turn (or a
+  running child), a clock for a message queued behind the turn, and a green
+  dot for a result you have not read. Background work shimmers in its own
+  glyph: a terminal, an added agent, a workflow, a checklist for plan mode, a
+  target for a goal. A pencil marks an unsent draft, drawn in the working
+  colour when something is running. A status another plugin set on the row
+  shows too, by bb's rule: over anything except a running turn, a failure or
+  a question.
+
+- **Snoozed** — hidden until a wake time you chose: in an hour, this evening
+  (6pm, offered until 5pm), tomorrow at 9am, or next Monday at 9am.
+  A snoozed thread comes back early if it starts working or asks you
+  something. Its one-line row keeps the card's glyph and time, with the wake
+  countdown beside them.
+- **Settled** — work you are done with, collapsed to one line each. See
+  below for what settling stops.
+
+Right-click (or long-press) any row for the same park actions and bb's own:
+open in split, mark read, pin, archive, delete. Delete goes through bb's
+confirmation.
+
+## First paint
+
+The sidebar's first frame is the list you last saw, not a list that re-sorts
+a second later. The parking store, the project avatars and the cache
+thresholds are kept in this browser's localStorage, written whenever they
+change, and read before the first render; the server's answer replaces them a
+moment later and only what really changed moves, without sliding. On a first
+launch there is no snapshot, and the list shows a still placeholder until the
+store answers — never the threads unshelved. Avatar images in the snapshot are
+capped at 512 KB, smallest first.
+
+If the store cannot be read at all, the list says why and offers Retry. If a
+later refresh fails, the list stays and one line says the shelves may be out
+of date.
 
 ## Cache window
 
 The idle age is not trivia about when you last spoke to a thread. An agent's
 prompt cache lapses on a timer, so the age is what says whether your next
-message resumes a cached conversation or pays to rebuild one — which is why it
-is measured from when that thread's own last run ENDED, recorded by this
-plugin, rather than from bb's `updatedAt`, which also moves for a retitle or a
-queued message.
+message resumes a cached conversation or pays to rebuild one. It is therefore
+read from bb's own event log: the idle age runs from the newest
+`turn/completed`, which lands in the same millisecond as the turn's last API
+response, and a running turn's timer from the newest `turn/started`. The
+server reads them when a thread goes active, idle or failed, and once more for
+every live thread shortly after it loads, so an event missed while the plugin
+was stopped heals itself. bb's `updatedAt` is never used: it also moves for a
+rename, a pin or a read.
 
 Two settings mark the band. Past **Minutes before an idle thread's age turns
-amber** the age is drawn in the same amber the raised-hand glyph uses. Past
-**Minutes after which the cache window is gone** it goes quiet again: the
-window has already lapsed, and a warning about a decision there is nothing left
-to make is noise on every stale row. The colour is only ever on an idle age — a
-run in flight is not yet a question about caching.
+amber** (50 by default) the age is drawn in the same amber the raised-hand
+glyph uses. Past **Minutes after which the cache window is gone** (60) it goes
+quiet again: the window has already lapsed, and a warning about a decision
+there is nothing left to make is noise on every stale row. The colour is only
+ever on an idle age — a turn in flight is not yet a question about caching.
 
 ## Project avatars
 
@@ -175,37 +221,76 @@ header shows no parent chip.
 
 ## What it demonstrates
 
-| Plugin API                                         | Used for                                                                                    |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `experimental_threadList`                          | the sidebar's scrolling list (bb keeps the New-thread button, search, nav rows, and footer) |
-| `experimental_threadHeaderAction`                  | the two header chips: children on a parent, and the way back on a child                     |
-| `experimental_useSidebarThreads`                   | live threads and projects, from the host's own cache                                        |
-| `experimental_useSidebarThreadActions`             | open, open-in-split, new thread                                                             |
-| `experimental_useSidebarThreadSplit`               | dragging a card out to a split pane                                                         |
-| `experimental_useSidebarThreadPullRequest`         | the `#412` badge, coloured by bb's attention state                                          |
-| `@radix-ui/react-context-menu` (shimmed)           | this plugin's own right-click menu, built on the action hook                                |
-| `settingsSection`                                  | the per-project avatar editor (the only place an avatar is set)                             |
-| `bb.settings.define`                               | auto-archive, the cache window, and each automatic avatar source's switch                   |
-| `bb.background.schedule`                           | the auto-archive pass (hourly ticker, user-set interval) and the avatar sweep                                           |
-| `bb.storage.database()` + `bb.rpc` + `bb.realtime` | the settled/snoozed store, and the project-avatar store behind it                            |
+| Plugin API                                               | Used for                                                                         |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `experimental_threadList`                                | the sidebar's scrolling list (bb keeps New thread, search, nav rows, footer)     |
+| `experimental_threadHeaderAction`                        | the two header chips: children on a parent, and the way back on a child          |
+| `experimental_useSidebarThreads`                         | live threads and projects, from the host's own cache                             |
+| `experimental_useSidebarThreadActions`                   | open, open-in-split, read, pin, archive, delete                                  |
+| `useSidebarThreadDraft`, `…RowStatus`, `…Shortcut`       | the draft pencil, other plugins' row statuses, and the jump-key pill             |
+| `experimental_useSidebarThreadSplit`                     | dragging a card out to a split pane                                              |
+| `experimental_useSidebarThreadPullRequest`               | the `#412` badge, coloured by bb's attention state                               |
+| `experimental_ProviderIcon`, `experimental_useProviders` | the agent's glyph and name, from bb's provider directory                         |
+| host-shimmed Radix menus, vendored from bb's registry    | the right-click menu, the snooze presets, and the children menu                  |
+| `settingsSection`                                        | the per-project avatar editor, and the auto-archive "run now" report             |
+| `bb.settings.define`                                     | auto-archive, reaping, the cache window, and each automatic avatar source        |
+| `bb.background.schedule`                                 | the auto-archive pass (hourly ticker, user-set interval) and the avatar sweep    |
+| `bb.sdk.threads.events.list`                             | turn timing from bb's event log                                                  |
+| `experimental_defineHostEntry`                           | stopping a settled worktree's processes on the machine that holds it             |
+| `bb.storage.database()` + `bb.rpc` + `bb.realtime`       | the parking store, pushed to every window as numbered row changes                |
 
-The plugin API ships **no components**. Status glyphs and the right-click menu
-are both this plugin's own: `indicator` arrives as data, and every menu item is
-one call on `experimental_useSidebarThreadActions`. Choosing them is the point
-of a replaced sidebar. Deletion still routes through `requestDelete`, so BB
-shows its confirmation dialog rather than a plugin deleting a subtree silently.
-The small icon and select components also live in this example. The example
-does not import BB's private shared UI package.
+The plugin API ships **no components**. Status glyphs and the menus are this
+plugin's own: `indicator` arrives as data, and every menu item is one call on
+`experimental_useSidebarThreadActions`. The menus are bb's own shadcn source
+(context-menu and dropdown-menu from bb's registry, trimmed), over the Radix
+packages the host shims, portaled with the plugin's style scope so they flip
+at screen edges, close on Escape and move by keyboard. Deletion routes through
+`requestDelete`, so bb shows its confirmation rather than a plugin deleting a
+subtree silently.
 
 ## Where the lifecycle lives
 
 Settled and snoozed state is in **this plugin's** SQLite database, never on
 bb's thread. Putting it on the thread would mean a schema change, a wire
 change, and a `HOST_DAEMON_PROTOCOL_VERSION` bump for a concept only this
-sidebar understands. Uninstalling the plugin takes its state with it.
+sidebar understands. Uninstalling the plugin takes its state with it. Parking
+applies on screen at once; if the server refuses, it is taken back and a toast
+says why.
 
 One rule matters more than the rest: **a thread that is working can never be
-parked.** bb has more kinds of live work than a session status — workflows,
+parked.** bb has more kinds of live work than a running turn — workflows,
 background agents, background commands, plan mode, goals — and every one of
-them blocks parking and wakes a parked thread. Hiding running work is the one
-failure this feature cannot afford. See `canPark` in `src/lifecycle.ts`.
+them, on the thread or on any thread below it, blocks parking and wakes a
+parked thread. Hiding running work is the one failure this feature cannot
+afford. See `canPark` in `src/lifecycle.ts`.
+
+## What settling stops
+
+Settling says the work is done, so by default (**Stop leftover terminals and
+processes when a thread settles**) the processes it started stop too. The
+settle is answered at once; the cleanup runs after it, and the window that
+settled gets a toast naming what it stopped or left running. In short:
+
+- **Archive-tree scope.** It covers what bb's archive would take: the thread,
+  its children, threads whose lifetime it owns, and hidden threads spun off
+  from it, deepest first. It closes their live terminals.
+- **Worktree-only sweep.** Leftover processes are killed only under a
+  worktree. A project checkout is where you work too, so it gets its
+  terminals closed and nothing else.
+- **Live-turn guard.** A worktree where any thread is mid-turn is left alone,
+  judged from a fresh read of bb just before the kill.
+- **Per-machine cleanup.** The kill runs on the machine that holds the
+  worktree, through the plugin's host entry, which refuses the filesystem
+  root, your home folder, or anything above it. An unreachable machine is
+  reported, and nothing is queued for later.
+
+Undoing a settle stops the cleanup before its next step. The auto-archive
+sweep reaps by the same rules and checks for live work again right before it
+archives. The full rules and their trade-offs are in
+[SPEC-reap-on-settle.md](SPEC-reap-on-settle.md).
+
+## Known limitation
+
+On launch bb may briefly show its own thread list before it loads your
+sidebar choice, then swap to this one. That is bb reading the preference late,
+not this plugin; once this list mounts, its first frame is the real list.
