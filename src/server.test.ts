@@ -232,7 +232,7 @@ describe("turn timing", () => {
       ],
     });
     const host = load({ sdk: { threads: { events: log.sdk } } });
-    const handled = host.harness.behavior.emitThreadEvent("thread.idle", {
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
       thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
       lastAssistantText: null,
     });
@@ -240,7 +240,7 @@ describe("turn timing", () => {
     expect(await listRows(host)).toEqual([]);
 
     log.push("thr_run", { seq: 3, createdAt: T + 20_000, type: "turn/completed" });
-    await handled;
+    await flushTasks();
 
     expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T + 20_000);
   });
@@ -250,14 +250,14 @@ describe("turn timing", () => {
       thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
     });
     const host = load({ sdk: { threads: { events: log.sdk } } });
-    const handled = host.harness.behavior.emitThreadEvent("thread.active", {
+    await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
     await flushTasks();
     expect(await listRows(host)).toEqual([]);
 
     log.push("thr_run", { seq: 2, createdAt: T + 7_000, type: "turn/started" });
-    await handled;
+    await flushTasks();
 
     expect((await listRows(host))[0]?.startedWorkingAt).toBe(T + 7_000);
   });
@@ -269,7 +269,7 @@ describe("turn timing", () => {
       thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
     });
     const host = load({ sdk: { threads: { events: log.sdk } } });
-    const started = host.harness.behavior.emitThreadEvent("thread.active", {
+    await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
     await flushTasks();
@@ -282,7 +282,7 @@ describe("turn timing", () => {
       lastAssistantText: null,
     });
     log.flush();
-    await started;
+    await flushTasks();
 
     const [row] = await listRows(host);
     expect(row?.startedWorkingAt).toBeNull();
@@ -477,14 +477,15 @@ describe("turn timing races", () => {
           },
         },
       });
-      const idle = host.harness.behavior.emitThreadEvent("thread.idle", {
+      await host.harness.behavior.emitThreadEvent("thread.idle", {
         thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
         lastAssistantText: null,
       });
       await vi.advanceTimersByTimeAsync(BACKFILL_DELAY_MS + 10);
 
       log.push("thr_run", { seq: 3, createdAt: T + 9_000, type: "turn/completed" });
-      await idle;
+      // Fake timers are on, so the drain is advanced rather than waited for.
+      await vi.advanceTimersByTimeAsync(0);
 
       expect((await listRows(host))[0]).toMatchObject({
         startedWorkingAt: null,
@@ -493,6 +494,32 @@ describe("turn timing races", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // bb times an event handler until its promise settles and lists it as
+  // current work in stall reports. The log wait belongs in the background.
+  it("returns from the event handler while the log read is still waiting", async () => {
+    const log = eventLog({
+      thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    let returned = false;
+    void host.harness.behavior
+      .emitThreadEvent("thread.active", {
+        thread: makeThreadResponse({ id: "thr_run", status: "active" }),
+      })
+      .then(() => {
+        returned = true;
+      });
+    await flushTasks();
+
+    // The start row has not landed, so the read is still waiting on it.
+    expect(returned).toBe(true);
+    expect(await listRows(host)).toEqual([]);
+
+    log.push("thr_run", { seq: 2, createdAt: T + 3_000, type: "turn/started" });
+    await flushTasks();
+    expect((await listRows(host))[0]?.startedWorkingAt).toBe(T + 3_000);
   });
 
   // A turn that stopped without writing its completion leaves its start on
@@ -506,23 +533,23 @@ describe("turn timing races", () => {
     });
     const host = load({ sdk: { threads: { events: log.sdk } } });
     // The turn fails and its completion never lands; the wait gives up.
-    const failed = host.harness.behavior.emitThreadEvent("thread.failed", {
+    await host.harness.behavior.emitThreadEvent("thread.failed", {
       thread: makeThreadResponse({ id: "thr_run", status: "error" }),
       error: "provider crashed",
     });
     await flushTasks();
     log.timeOut();
-    await failed;
+    await flushTasks();
 
     // Hours later the user resumes; bb announces the turn before its row.
-    const active = host.harness.behavior.emitThreadEvent("thread.active", {
+    await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
     await flushTasks();
     expect((await listRows(host))[0]?.startedWorkingAt).toBeNull();
 
     log.push("thr_run", { seq: 5, createdAt: T + 7_200_000, type: "turn/started" });
-    await active;
+    await flushTasks();
     expect((await listRows(host))[0]?.startedWorkingAt).toBe(T + 7_200_000);
   });
 
@@ -533,7 +560,7 @@ describe("turn timing races", () => {
       thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
     });
     const host = load({ sdk: { threads: { events: log.sdk } } });
-    const active = host.harness.behavior.emitThreadEvent("thread.active", {
+    await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
     await flushTasks();
@@ -541,7 +568,7 @@ describe("turn timing races", () => {
     await host.harness.lifecycle.dispose();
 
     log.push("thr_run", { seq: 2, createdAt: T + 1, type: "turn/started" });
-    await active.catch(() => {});
+    await flushTasks();
 
     expect(host.harness.inspection.realtimeSignals.length).toBe(published);
   });

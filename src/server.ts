@@ -890,10 +890,29 @@ export default function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => {
     clear(thread.id);
   });
+  /**
+   * Start a timing read and return without waiting for it.
+   *
+   * bb calls event handlers without awaiting them, but it times each one
+   * until its promise settles, and lists every unsettled one as current work
+   * in its event-loop stall reports. A read that waits seconds for its log
+   * row would sit in both for all of those seconds. Detached, the handler
+   * returns at once; the read keeps its own ordering (the per-thread token)
+   * and stops on unload through the lifetime signal it already carries.
+   * `refreshTiming` catches its own failures, so nothing here can reject.
+   */
+  const refreshInBackground = (
+    threadId: string,
+    read: Parameters<typeof refreshTiming>[1],
+    context: string,
+  ): void => {
+    void refreshTiming(threadId, read, context);
+  };
+
   // Back from the archive, it needs its idle age again — read from the log,
   // which kept every turn while the store forgot it.
   bb.events.on("thread.unarchived", ({ thread }) =>
-    refreshTiming(
+    refreshInBackground(
       thread.id,
       (log, options) => readTurnTiming(log, thread.id, readStatus(thread.id), options),
       "thread.unarchived",
@@ -903,14 +922,14 @@ export default function plugin(bb: BbPluginApi) {
   // bb reports the transitions; the times come from its event log, so every
   // client and every reload measures the same turn from the same instant.
   bb.events.on("thread.active", ({ thread }) =>
-    refreshTiming(
+    refreshInBackground(
       thread.id,
       (log, options) => readStartedTiming(log, thread.id, options),
       "thread.active",
     ),
   );
   bb.events.on("thread.idle", ({ thread }) =>
-    refreshTiming(
+    refreshInBackground(
       thread.id,
       (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.idle",
@@ -918,7 +937,7 @@ export default function plugin(bb: BbPluginApi) {
   );
   // A failed turn has ended too, and bb records its end the same way.
   bb.events.on("thread.failed", ({ thread }) =>
-    refreshTiming(
+    refreshInBackground(
       thread.id,
       (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.failed",
