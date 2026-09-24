@@ -311,8 +311,10 @@ const REAP_HOST_TIMEOUT_MS = 60_000;
 
 /**
  * The longest a reap's window is believed open: the host sweep's deadline
- * plus as long again for listing threads and closing terminals. A window a
- * reload left open is read, and on the next load closed, as ending here.
+ * plus as long again for listing threads and closing terminals. Applied only
+ * to a window a previous load left open, which the next load closes here; a
+ * reap still running in this process keeps its window open until it ends,
+ * however many slow worktrees it sweeps.
  */
 export const REAP_WINDOW_MAX_MS = 2 * REAP_HOST_TIMEOUT_MS;
 
@@ -988,7 +990,9 @@ export default function plugin(bb: BbPluginApi) {
       | { reap_started_at: number | null; reap_ended_at: number | null }
       | undefined;
     if (window?.reap_started_at == null) return false;
-    const end = window.reap_ended_at ?? window.reap_started_at + REAP_WINDOW_MAX_MS;
+    // Open means a reap in this process is still running: the load closed
+    // every window an earlier process left open.
+    const end = window.reap_ended_at ?? Number.POSITIVE_INFINITY;
     return endedAt >= window.reap_started_at && endedAt <= end + REAP_GRACE_MS;
   };
 

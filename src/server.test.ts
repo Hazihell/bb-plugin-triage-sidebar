@@ -493,9 +493,9 @@ describe("turn timing", () => {
       expect(row?.quietAttentionAt).toBeNull();
     });
 
-    // A reload mid-reap leaves the window without an end. It must not stay
-    // open forever and swallow a command that later finishes on its own.
-    it("reads a window left open as ending at the longest a reap runs", async () => {
+    // A reap sweeping several slow worktrees can run past the cap; while it
+    // runs in this process, its window is still open.
+    it("trusts a window this process still has open, however long", async () => {
       const { row } = await settleThenWake({
         commandEndedAfterReap: 0,
         afterSettle: (host) =>
@@ -507,7 +507,7 @@ describe("turn timing", () => {
             )
             .run(Date.now() - REAP_WINDOW_MAX_MS - 60_000, "thr_dev"),
       });
-      expect(row?.quietAttentionAt).toBeNull();
+      expect(row?.quietAttentionAt).not.toBeNull();
     });
   });
 
