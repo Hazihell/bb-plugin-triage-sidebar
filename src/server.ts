@@ -31,6 +31,7 @@ import {
 } from "./lifecycle-sync";
 import {
   forEachLimited,
+  isBackgroundWakeTurn,
   readStartedTiming,
   readStoppedTiming,
   readTurnTiming,
@@ -113,6 +114,9 @@ const migrations = [
   // start on top of the log; this is what keeps the next turn's timer from
   // counting from it. Internal: never sent to the sidebar.
   `ALTER TABLE thread_lifecycle ADD COLUMN ended_start_seq INTEGER`,
+  // Attention up to this time does not un-park the thread: it came from a
+  // turn the agent started by itself when a background command ended.
+  `ALTER TABLE thread_lifecycle ADD COLUMN quiet_attention_at INTEGER`,
 ];
 
 export interface StoredLifecycleRow {
@@ -139,6 +143,12 @@ export interface StoredLifecycleRow {
    * reads. There is deliberately no fallback to it.
    */
   lastRunEndedAt: number | null;
+  /**
+   * Attention up to this time does not count as the thread speaking up after
+   * the park. Set when a parked thread ran a turn the agent started by itself
+   * because a background command ended; cleared by every parking write.
+   */
+  quietAttentionAt: number | null;
 }
 
 interface LifecycleDbRow {
@@ -148,6 +158,7 @@ interface LifecycleDbRow {
   snoozed_at: number | null;
   started_working_at: number | null;
   last_run_ended_at: number | null;
+  quiet_attention_at: number | null;
 }
 
 const threadIdSchema = z.object({ threadId: z.string().trim().min(1) });
@@ -212,6 +223,7 @@ export const triageSidebarRpcContract = defineRpcContract({
           snoozedAt: z.number().nullable(),
           startedWorkingAt: z.number().nullable(),
           lastRunEndedAt: z.number().nullable(),
+          quietAttentionAt: z.number().nullable(),
         }),
       ),
     }),
@@ -542,7 +554,8 @@ export default function plugin(bb: BbPluginApi) {
   });
 
   const LIFECYCLE_COLUMNS = `thread_id, settled_at, snoozed_until, snoozed_at,
-                             started_working_at, last_run_ended_at`;
+                             started_working_at, last_run_ended_at,
+                             quiet_attention_at`;
 
   const fromDbRow = (row: LifecycleDbRow): StoredLifecycleRow => ({
     threadId: row.thread_id,
@@ -551,6 +564,7 @@ export default function plugin(bb: BbPluginApi) {
     snoozedAt: row.snoozed_at,
     startedWorkingAt: row.started_working_at,
     lastRunEndedAt: row.last_run_ended_at,
+    quietAttentionAt: row.quiet_attention_at,
   });
 
   const readAll = (): StoredLifecycleRow[] =>
@@ -621,7 +635,8 @@ export default function plugin(bb: BbPluginApi) {
            AND snoozed_at IS NULL
            AND started_working_at IS NULL
            AND last_run_ended_at IS NULL
-           AND ended_start_seq IS NULL`,
+           AND ended_start_seq IS NULL
+           AND quiet_attention_at IS NULL`,
     ).run(threadId);
   };
 
@@ -631,6 +646,7 @@ export default function plugin(bb: BbPluginApi) {
    * The parking columns and bb's timing columns answer to different owners:
    * the user parks a thread, bb decides when it runs. This touches the first
    * three and never the other two, so un-parking a thread keeps its idle age.
+   * It also drops any discounted attention: that belonged to the old park.
    */
   const writeParking = (
     threadId: string,
@@ -646,7 +662,8 @@ export default function plugin(bb: BbPluginApi) {
        ON CONFLICT(thread_id) DO UPDATE SET
          settled_at = excluded.settled_at,
          snoozed_until = excluded.snoozed_until,
-         snoozed_at = excluded.snoozed_at`,
+         snoozed_at = excluded.snoozed_at,
+         quiet_attention_at = NULL`,
     ).run(threadId, parking.settledAt, parking.snoozedUntil, parking.snoozedAt);
     deleteIfEmpty(threadId);
     publishRow(threadId);
@@ -919,30 +936,98 @@ export default function plugin(bb: BbPluginApi) {
     ),
   );
 
+  /**
+   * Threads whose running turn started while they sat parked with nothing
+   * said since the park. Only these can have their turn's attention
+   * discounted: a thread that had already spoken up is back in the inbox, and
+   * discounting a later turn would hide it again. In memory, because it only
+   * spans one turn; a reload mid-turn costs one bounce back to the inbox.
+   */
+  const parkedAtTurnStart = new Set<string>();
+
+  const notePark = (thread: { id: string; latestAttentionAt: number }): void => {
+    const row = readOne(thread.id);
+    const parkedAt = row?.settledAt ?? row?.snoozedAt ?? null;
+    if (
+      row !== undefined &&
+      parkedAt !== null &&
+      thread.latestAttentionAt <= Math.max(parkedAt, row.quietAttentionAt ?? parkedAt)
+    ) {
+      parkedAtTurnStart.add(thread.id);
+    } else {
+      parkedAtTurnStart.delete(thread.id);
+    }
+  };
+
+  /**
+   * Keep a parked thread parked through a turn the agent started by itself
+   * because a background command ended.
+   *
+   * Settling kills the dev servers an agent left running, and Claude Code
+   * answers a killed background command with a turn of its own. bb stamps
+   * new attention on the thread when that turn ends, which reads to the
+   * shelves as the thread speaking up, so it would bounce back to the inbox
+   * seconds after the user filed it away. Anything else the turn does — a
+   * question, more work — still brings it back on its own terms.
+   */
+  const discountBackgroundWake = async (thread: {
+    id: string;
+    latestAttentionAt: number;
+  }): Promise<void> => {
+    if (!parkedAtTurnStart.delete(thread.id) || unloaded()) return;
+    try {
+      const woke = await isBackgroundWakeTurn(
+        bb.sdk.threads.events,
+        thread.id,
+        lifetime.signal,
+      );
+      if (!woke || unloaded()) return;
+    } catch (error) {
+      if (unloaded()) return;
+      bb.log.warn(
+        `parking: could not read how ${thread.id}'s turn started (${String(error)})`,
+      );
+      return;
+    }
+    const row = readOne(thread.id);
+    if (row === undefined || (row.settledAt === null && row.snoozedUntil === null)) {
+      return;
+    }
+    db.prepare(
+      `UPDATE thread_lifecycle
+         SET quiet_attention_at = MAX(COALESCE(quiet_attention_at, 0), ?)
+       WHERE thread_id = ?`,
+    ).run(thread.latestAttentionAt, thread.id);
+    publishRow(thread.id);
+  };
+
   // bb reports the transitions; the times come from its event log, so every
   // client and every reload measures the same turn from the same instant.
-  bb.events.on("thread.active", ({ thread }) =>
+  bb.events.on("thread.active", ({ thread }) => {
+    notePark(thread);
     refreshInBackground(
       thread.id,
       (log, options) => readStartedTiming(log, thread.id, options),
       "thread.active",
-    ),
-  );
-  bb.events.on("thread.idle", ({ thread }) =>
+    );
+  });
+  bb.events.on("thread.idle", ({ thread }) => {
+    void discountBackgroundWake(thread);
     refreshInBackground(
       thread.id,
       (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.idle",
-    ),
-  );
+    );
+  });
   // A failed turn has ended too, and bb records its end the same way.
-  bb.events.on("thread.failed", ({ thread }) =>
+  bb.events.on("thread.failed", ({ thread }) => {
+    void discountBackgroundWake(thread);
     refreshInBackground(
       thread.id,
       (log, options) => readStoppedTiming(log, thread.id, options),
       "thread.failed",
-    ),
-  );
+    );
+  });
 
   // Deferred off the factory, like the avatar sweep: `bb.sdk` is only bound
   // once the server is listening, and a plugin that blocks its own load on a

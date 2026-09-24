@@ -168,6 +168,7 @@ export function blankRow(threadId: string): ThreadLifecycleRow {
     snoozedAt: null,
     startedWorkingAt: null,
     lastRunEndedAt: null,
+    quietAttentionAt: null,
   };
 }
 
@@ -179,8 +180,9 @@ export type ParkingChange =
 /**
  * The row a parking change will produce, predicted on the client so the shelf
  * moves the moment the user acts. The same rule the server writes by: a settle
- * clears any snooze, a snooze clears any settle, un-parking clears both, and
- * bb's timing columns are never touched.
+ * clears any snooze, a snooze clears any settle, un-parking clears both, any
+ * of them drops the old park's discounted attention, and bb's timing columns
+ * are never touched.
  */
 export function predictParkingRow(
   current: ThreadLifecycleRow | undefined,
@@ -190,16 +192,29 @@ export function predictParkingRow(
   const base = current ?? blankRow(threadId);
   switch (change.kind) {
     case "settle":
-      return { ...base, settledAt: change.at, snoozedUntil: null, snoozedAt: null };
+      return {
+        ...base,
+        settledAt: change.at,
+        snoozedUntil: null,
+        snoozedAt: null,
+        quietAttentionAt: null,
+      };
     case "snooze":
       return {
         ...base,
         settledAt: null,
         snoozedUntil: change.until,
         snoozedAt: change.at,
+        quietAttentionAt: null,
       };
     case "unpark":
-      return { ...base, settledAt: null, snoozedUntil: null, snoozedAt: null };
+      return {
+        ...base,
+        settledAt: null,
+        snoozedUntil: null,
+        snoozedAt: null,
+        quietAttentionAt: null,
+      };
   }
 }
 
@@ -215,7 +230,8 @@ export function sameRow(
     a.snoozedUntil === b.snoozedUntil &&
     a.snoozedAt === b.snoozedAt &&
     a.startedWorkingAt === b.startedWorkingAt &&
-    a.lastRunEndedAt === b.lastRunEndedAt
+    a.lastRunEndedAt === b.lastRunEndedAt &&
+    a.quietAttentionAt === b.quietAttentionAt
   );
 }
 

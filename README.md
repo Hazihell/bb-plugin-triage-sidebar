@@ -277,7 +277,10 @@ running work is the one failure this feature cannot afford. See `canPark` in
 Background commands are the exception. A dev server or watcher the agent left
 running after its turn is exactly what settling stops, so it never blocks
 Settle or Snooze and never pulls a parked thread back; the terminal glyph
-stays beside the time. The auto-archive sweep is stricter: it leaves a settled
+stays beside the time. When settling kills that command, Claude Code answers
+with a turn of its own; that turn shows in the inbox while it runs, but the
+attention it ends with does not count as the thread speaking up, so it goes
+back to its shelf. A question or anything else it starts still brings it back. The auto-archive sweep is stricter: it leaves a settled
 thread whose command still runs where it is, and archives it once the command
 is gone.
 

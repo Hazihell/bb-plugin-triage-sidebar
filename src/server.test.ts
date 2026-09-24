@@ -104,7 +104,11 @@ describe("parseAutoArchiveDays", () => {
 interface LogRow {
   seq: number;
   createdAt: number;
-  type: "turn/started" | "turn/completed";
+  type:
+    | "turn/started"
+    | "turn/completed"
+    | "turn/input/accepted"
+    | "item/backgroundTask/completed";
 }
 
 /**
@@ -388,6 +392,57 @@ describe("turn timing", () => {
     const [row] = await listRows(host);
     expect(row?.settledAt).not.toBeNull();
     expect(row?.lastRunEndedAt).toBe(T + 1_000);
+  });
+
+  describe("a turn the agent starts because a background command ended", () => {
+    // Settling kills the dev server; Claude Code answers with a turn of its
+    // own, and bb stamps attention on the thread when that turn ends.
+    async function settleThenRun(accepted: boolean) {
+      const log = eventLog({
+        thr_dev: [
+          { seq: 1, createdAt: T, type: "turn/started" },
+          { seq: 2, createdAt: T + 1, type: "turn/input/accepted" },
+          { seq: 3, createdAt: T + 1_000, type: "turn/completed" },
+          { seq: 4, createdAt: T + 2_000, type: "item/backgroundTask/completed" },
+          { seq: 5, createdAt: T + 3_000, type: "turn/started" },
+          ...(accepted
+            ? [{ seq: 6, createdAt: T + 3_001, type: "turn/input/accepted" as const }]
+            : []),
+          { seq: 7, createdAt: T + 9_000, type: "turn/completed" },
+        ],
+      });
+      const host = load({ sdk: { threads: { events: log.sdk } } });
+      await host.harness.behavior.callRpc("settle", { threadId: "thr_dev" });
+      const settledAt = (await listRows(host))[0]!.settledAt!;
+      await host.harness.behavior.emitThreadEvent("thread.active", {
+        thread: makeThreadResponse({
+          id: "thr_dev",
+          status: "active",
+          latestAttentionAt: settledAt - 1,
+        }),
+      });
+      await host.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: makeThreadResponse({
+          id: "thr_dev",
+          status: "idle",
+          latestAttentionAt: settledAt + 5_000,
+        }),
+        lastAssistantText: null,
+      });
+      await flushTasks();
+      return { row: (await listRows(host))[0], settledAt };
+    }
+
+    it("discounts that turn's attention, so the thread stays settled", async () => {
+      const { row, settledAt } = await settleThenRun(false);
+      expect(row?.settledAt).toBe(settledAt);
+      expect(row?.quietAttentionAt).toBe(settledAt + 5_000);
+    });
+
+    it("leaves a turn bb started with input to speak for itself", async () => {
+      const { row } = await settleThenRun(true);
+      expect(row?.quietAttentionAt).toBeNull();
+    });
   });
 
   // Events missed while the plugin was not running — a reload, a reinstall —

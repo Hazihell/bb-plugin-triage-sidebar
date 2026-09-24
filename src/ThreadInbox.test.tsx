@@ -43,6 +43,7 @@ function endedRow(threadId: string, lastRunEndedAt: number) {
     snoozedAt: null,
     startedWorkingAt: null,
     lastRunEndedAt,
+    quietAttentionAt: null,
   };
 }
 

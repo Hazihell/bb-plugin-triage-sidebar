@@ -27,6 +27,7 @@ const row = (
   snoozedAt: null,
   startedWorkingAt: null,
   lastRunEndedAt: null,
+  quietAttentionAt: null,
   ...overrides,
 });
 
@@ -83,6 +84,25 @@ describe("resolveShelf", () => {
         1_000,
       ),
     ).toBe("active");
+  });
+
+  // The agent's own turn after settling killed its dev server ends with new
+  // attention; the backend marks it as not counting.
+  it("keeps a thread settled through attention it was told to discount", () => {
+    const parked = row({ settledAt: 500, quietAttentionAt: 900 });
+    expect(resolveShelf(parked, { ...quiet, latestAttentionAt: 900 }, 1_000)).toBe(
+      "settled",
+    );
+    expect(resolveShelf(parked, { ...quiet, latestAttentionAt: 901 }, 1_000)).toBe(
+      "active",
+    );
+  });
+
+  it("keeps a thread snoozed through attention it was told to discount", () => {
+    const parked = row({ snoozedUntil: 2_000, snoozedAt: 500, quietAttentionAt: 900 });
+    expect(resolveShelf(parked, { ...quiet, latestAttentionAt: 900 }, 1_000)).toBe(
+      "snoozed",
+    );
   });
 
   it("keeps a snoozed thread hidden until its wake time", () => {

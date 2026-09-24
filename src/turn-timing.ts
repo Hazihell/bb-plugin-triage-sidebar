@@ -16,6 +16,12 @@
 
 export type TurnEventType = "turn/started" | "turn/completed";
 
+/** The rows that say who started a turn. */
+export type TurnOriginEventType =
+  | "turn/started"
+  | "turn/input/accepted"
+  | "item/backgroundTask/completed";
+
 /** The fields of one event row this module reads. */
 export interface TurnEventRow {
   seq: number;
@@ -27,7 +33,10 @@ export interface TurnEventRow {
 export interface TurnEventLog {
   list(args: {
     threadId: string;
-    types: readonly [TurnEventType, ...TurnEventType[]];
+    types: readonly [
+      TurnEventType | TurnOriginEventType,
+      ...(TurnEventType | TurnOriginEventType)[],
+    ];
     order: "desc";
     limit: string;
     signal?: AbortSignal;
@@ -251,6 +260,43 @@ export async function readStoppedTiming(
     lastRunEndedAt: next?.createdAt ?? completed?.createdAt ?? null,
     endedStartSeq: started.seq,
   };
+}
+
+/**
+ * Whether the thread's newest turn was one the agent started by itself
+ * because a background task ended, rather than one bb started with input.
+ *
+ * bb logs `turn/input/accepted` right after the start of every turn it asks
+ * for — a user's message, a queued one, a child's report to its parent. A
+ * turn the provider starts on its own has none. Claude Code starts one when a
+ * background command it launched exits, and that includes a dev server the
+ * settle's cleanup just killed. Only that case counts: a turn with no input
+ * whose start does not directly follow a background task's end is left to
+ * speak for itself.
+ */
+export async function isBackgroundWakeTurn(
+  log: TurnEventLog,
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const rows = await log.list({
+    threadId,
+    types: ["turn/started", "turn/input/accepted", "item/backgroundTask/completed"],
+    order: "desc",
+    limit: "4",
+    signal,
+  });
+  return backgroundWakeFromRows(rows);
+}
+
+/** The rule {@link isBackgroundWakeTurn} applies, over rows newest first. */
+export function backgroundWakeFromRows(rows: readonly TurnEventRow[]): boolean {
+  const start = rows.findIndex((row) => row.type === "turn/started");
+  if (start === -1) return false;
+  if (rows.slice(0, start).some((row) => row.type === "turn/input/accepted")) {
+    return false;
+  }
+  return rows[start + 1]?.type === "item/backgroundTask/completed";
 }
 
 /**

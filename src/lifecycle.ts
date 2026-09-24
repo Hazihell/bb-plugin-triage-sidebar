@@ -25,6 +25,13 @@ export interface ThreadLifecycleRow {
    * turn ever has. The card's idle age is measured from here and nothing else.
    */
   lastRunEndedAt: number | null;
+  /**
+   * Attention up to this time does not count as the thread speaking up after
+   * a park; null when there is none to discount. Written by the backend when a
+   * parked thread ran a turn nobody asked for — the agent woke itself because
+   * a background command ended, typically the one settling just killed.
+   */
+  quietAttentionAt: number | null;
 }
 
 /** The activity signals that outrank a user's parking decision. */
@@ -75,12 +82,15 @@ export function resolveShelf(
   if (row === undefined) return "active";
   if (!canPark(signals)) return "active";
 
+  // Whether the thread said something after `at` that counts.
+  const spokeSince = (at: number) =>
+    signals.latestAttentionAt > Math.max(at, row.quietAttentionAt ?? at);
+
   if (row.snoozedUntil !== null) {
     // A timer that has elapsed wakes the thread; so does anything that
     // happened after the snooze was set.
     const wokeOnTimer = row.snoozedUntil <= now;
-    const wokeOnActivity =
-      row.snoozedAt !== null && signals.latestAttentionAt > row.snoozedAt;
+    const wokeOnActivity = row.snoozedAt !== null && spokeSince(row.snoozedAt);
     if (!wokeOnTimer && !wokeOnActivity) return "snoozed";
     return "active";
   }
@@ -88,7 +98,7 @@ export function resolveShelf(
   if (row.settledAt !== null) {
     // New attention since the settle un-settles it: the thread has more to
     // say than it did when the user filed it away.
-    if (signals.latestAttentionAt > row.settledAt) return "active";
+    if (spokeSince(row.settledAt)) return "active";
     return "settled";
   }
 

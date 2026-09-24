@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  backgroundWakeFromRows,
   forEachLimited,
   isRunningStatus,
   readNewestTurnRows,
@@ -15,6 +16,37 @@ const row = (
   createdAt: number,
   type: "turn/started" | "turn/completed",
 ): TurnEventRow => ({ seq, createdAt, type });
+
+describe("backgroundWakeFromRows", () => {
+  const row = (seq: number, type: string) => ({ seq, createdAt: seq, type });
+
+  it("reads a turn with no input, right after a background task ended, as a wake", () => {
+    expect(
+      backgroundWakeFromRows([
+        row(5, "turn/started"),
+        row(4, "item/backgroundTask/completed"),
+        row(2, "turn/input/accepted"),
+      ]),
+    ).toBe(true);
+  });
+
+  it("reads a turn bb started with input as the thread's own", () => {
+    expect(
+      backgroundWakeFromRows([
+        row(6, "turn/input/accepted"),
+        row(5, "turn/started"),
+        row(4, "item/backgroundTask/completed"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("needs the background task's end right before the start", () => {
+    expect(
+      backgroundWakeFromRows([row(5, "turn/started"), row(3, "turn/input/accepted")]),
+    ).toBe(false);
+    expect(backgroundWakeFromRows([])).toBe(false);
+  });
+});
 
 describe("timingFromRows", () => {
   it("reads an idle thread's end and no start", () => {

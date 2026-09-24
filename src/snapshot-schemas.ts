@@ -22,6 +22,7 @@ export const LIFECYCLE_SNAPSHOT = {
   snoozedAt: "number?",
   startedWorkingAt: "number?",
   lastRunEndedAt: "number?",
+  quietAttentionAt: "number?",
 } as const satisfies Record<keyof ThreadLifecycleRow, FieldKind>;
 
 /** Every field of a stored avatar row; the settings page reads the same map. */
