@@ -68,8 +68,8 @@ function render(
 afterEach(cleanup);
 
 // The anchor is a full-bleed overlay, so the row containers carry the text.
-function rowTitles(): (string | null)[] {
-  return screen.getAllByRole("listitem").map((row) => row.textContent);
+function rowTitles(): string[] {
+  return screen.getAllByRole("listitem").map((row) => row.textContent ?? "");
 }
 
 describe("triage-sidebar registration", () => {
@@ -1328,5 +1328,90 @@ describe("project avatars in the list", () => {
         "MC",
       ),
     ).toBeNull();
+  });
+});
+
+describe("order freeze", () => {
+  /** Two quiet threads and a snoozed one that outranks both once it wakes. */
+  function renderWithSnoozed() {
+    const snoozedRow = {
+      threadId: "thr_top",
+      settledAt: null,
+      snoozedUntil: Date.now() + 3_600_000,
+      snoozedAt: Date.now() - 1_000,
+      startedWorkingAt: null,
+      lastRunEndedAt: null,
+    };
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({ id: "thr_mid", title: "Middle", latestAttentionAt: 200 }),
+          thread({ id: "thr_low", title: "Lowest", latestAttentionAt: 100 }),
+          thread({ id: "thr_top", title: "Topmost", latestAttentionAt: 300 }),
+        ],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [snoozedRow] }),
+      },
+    });
+  }
+
+  const wake = {
+    kind: "row",
+    epoch: "test",
+    seq: 1,
+    threadId: "thr_top",
+    row: null,
+  };
+
+  function scrollArea(): HTMLElement {
+    return screen.getAllByRole("listitem")[0]!.closest(".overflow-y-auto")!;
+  }
+
+  it("re-ranks at once when nobody is using the list", async () => {
+    const rendered = renderWithSnoozed();
+    await screen.findByRole("region", { name: "Snoozed" });
+    await rendered.emitRealtime("lifecycle", wake);
+    expect(rowTitles()[0]).toContain("Topmost");
+  });
+
+  it("holds the order while the pointer is over the list", async () => {
+    const rendered = renderWithSnoozed();
+    await screen.findByRole("region", { name: "Snoozed" });
+    fireEvent.pointerEnter(scrollArea());
+    await rendered.emitRealtime("lifecycle", wake);
+    // Woken, so it is back in the inbox, but below the rows under the pointer.
+    expect(rowTitles().map((text) => text.slice(0, 40))).toEqual([
+      expect.stringContaining("Middle"),
+      expect.stringContaining("Lowest"),
+      expect.stringContaining("Topmost"),
+    ]);
+    fireEvent.pointerLeave(scrollArea());
+    await waitFor(() => expect(rowTitles()[0]).toContain("Topmost"));
+  });
+
+  it("holds the order while a row has keyboard focus", async () => {
+    const rendered = renderWithSnoozed();
+    await screen.findByRole("region", { name: "Snoozed" });
+    // Tabbed to, as a keyboard user gets there.
+    fireEvent.keyDown(document.body, { key: "Tab" });
+    screen.getAllByRole("link")[1]!.focus();
+    await rendered.emitRealtime("lifecycle", wake);
+    expect(rowTitles()[0]).toContain("Middle");
+    (document.activeElement as HTMLElement).blur();
+    await waitFor(() => expect(rowTitles()[0]).toContain("Topmost"));
+  });
+
+  // A click focuses the row's link too, and that focus can sit there for
+  // minutes after the pointer has gone: it must not pin the order.
+  it("does not hold the order for focus a click left behind", async () => {
+    const rendered = renderWithSnoozed();
+    await screen.findByRole("region", { name: "Snoozed" });
+    fireEvent.pointerDown(document.body);
+    screen.getAllByRole("link")[1]!.focus();
+    await rendered.emitRealtime("lifecycle", wake);
+    await waitFor(() => expect(rowTitles()[0]).toContain("Topmost"));
   });
 });

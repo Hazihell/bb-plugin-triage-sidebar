@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   experimental_useProviders as useProviders,
   experimental_useSidebarThreads as useSidebarThreads,
@@ -31,15 +31,19 @@ import {
   visibleInboxThreads,
 } from "./inbox";
 import { useFlipReorder } from "./useFlipReorder";
+import { holdOrder, OrderHoldContext, useOrderFreeze } from "./useOrderFreeze";
 
 const ALL_PROJECTS = "__all__";
 
 /**
  * The sidebar's scrolling list: one flat stack of cards, ordered by attention.
  *
- * Ordering by attention means rows move. To keep the movement from becoming
- * noise, each moved row is tweened from where it was, so the user sees a
- * thread travel rather than a different list.
+ * Ordering by attention means rows move. Two rules keep that from becoming
+ * noise. The order holds still while the user is using the list — pointer
+ * over it, a row focused from the keyboard, a row's menu open — so the row
+ * under the pointer is the row they meant. And when it catches up, each row
+ * that changed rank slides from where it was, once, so the user sees a thread
+ * travel rather than a different list.
  *
  * The host owns the New-thread button and thread search (the quick
  * palette), so this ships neither. It keeps only the one control the host has
@@ -72,7 +76,7 @@ export function ThreadInbox({
   const [showSettled, setShowSettled] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  useFlipReorder(scrollRef);
+  const { frozen, orderHold } = useOrderFreeze(scrollRef);
 
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -102,7 +106,7 @@ export function ThreadInbox({
   }, [threads]);
   const noChildWork = { running: 0, needingYou: 0 };
 
-  const { pinned, inbox, snoozed, settled } = useMemo(() => {
+  const live = useMemo(() => {
     const scoped = filterByProject(
       visibleInboxThreads(threads),
       scope === ALL_PROJECTS ? null : scope,
@@ -130,6 +134,39 @@ export function ThreadInbox({
       settled: sortByAttentionDescending(onSettledShelf, lifecycle.isBusy),
     };
   }, [lifecycle, scope, threads]);
+
+  // What changed underneath the list without the user seeing it happen: the
+  // host's threads or the parking store landing, or a different project.
+  // Order changes across one of these are adopted at once, frozen or not, and
+  // never slide.
+  const loadKey = `${status}|${lifecycle.status}|${scope}`;
+
+  // While frozen, each shelf keeps the order it last showed (see holdOrder);
+  // the ids it showed are recorded after every commit.
+  const shownIds = useRef<Record<SectionName, readonly string[]>>(NO_SECTIONS);
+  const shownLoadKey = useRef(loadKey);
+  const { pinned, inbox, snoozed, settled } = useMemo(() => {
+    if (!frozen || shownLoadKey.current !== loadKey) return live;
+    return {
+      pinned: holdOrder(shownIds.current.pinned, live.pinned),
+      inbox: holdOrder(shownIds.current.inbox, live.inbox),
+      snoozed: holdOrder(shownIds.current.snoozed, live.snoozed),
+      settled: holdOrder(shownIds.current.settled, live.settled),
+    };
+  }, [frozen, live, loadKey]);
+  useLayoutEffect(() => {
+    shownLoadKey.current = loadKey;
+    shownIds.current = {
+      pinned: pinned.map((thread) => thread.id),
+      inbox: inbox.map((thread) => thread.id),
+      snoozed: snoozed.map((thread) => thread.id),
+      settled: settled.map((thread) => thread.id),
+    };
+  }, [inbox, loadKey, pinned, settled, snoozed]);
+
+  // Opening or closing a shelf moves the rows below it, and that is not a
+  // re-rank either.
+  useFlipReorder(scrollRef, `${loadKey}|${showSnoozed}|${showSettled}`);
 
   // One bundle per row, built where the lifecycle store lives. The card's
   // hover buttons and the menu's items then drive the same four calls, so the
@@ -226,10 +263,13 @@ export function ThreadInbox({
         </Select>
       </div>
 
+      {/* Positioned, so it is every row's offset parent and the slide can
+          measure rows by layout alone. */}
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
+        className="relative min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
       >
+        <OrderHoldContext.Provider value={orderHold}>
         {status === "loading" ? null : status === "error" ? (
           <p
             role="status"
@@ -285,10 +325,19 @@ export function ThreadInbox({
             />
           </>
         )}
+        </OrderHoldContext.Provider>
       </div>
     </div>
   );
 }
+
+type SectionName = "pinned" | "inbox" | "snoozed" | "settled";
+const NO_SECTIONS: Record<SectionName, readonly string[]> = {
+  pinned: [],
+  inbox: [],
+  snoozed: [],
+  settled: [],
+};
 
 /**
  * A collapsed shelf of parked threads. The header stays while anything is
