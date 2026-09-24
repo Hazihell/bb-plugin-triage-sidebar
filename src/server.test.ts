@@ -447,6 +447,80 @@ describe("turn timing", () => {
   });
 });
 
+describe("lifecycle channel", () => {
+  const rowMessages = (host: FakePluginHost) =>
+    host.harness.inspection.realtimeSignals
+      .filter((signal) => signal.channel === "lifecycle")
+      .map((signal) => signal.payload as { kind: string; seq: number; threadId: string; row: StoredLifecycleRow | null })
+      .filter((payload) => payload.kind === "row");
+
+  // Each change carries the row itself, numbered, so a sidebar applies it
+  // instead of re-reading the table.
+  it("publishes each change as a numbered row", async () => {
+    const host = load();
+    await host.harness.behavior.callRpc("snooze", { threadId: "thr_a", snoozedUntil: Date.now() + 60_000 });
+    await host.harness.behavior.callRpc("unsnooze", { threadId: "thr_a" });
+
+    const messages = rowMessages(host);
+    expect(messages.map((m) => m.seq)).toEqual([1, 2]);
+    expect(messages[0]?.row?.snoozedUntil).not.toBeNull();
+    // Un-snoozed with nothing else in it, so the row is gone.
+    expect(messages[1]?.row).toBeNull();
+  });
+
+  it("hands out the counter a full read is current as of", async () => {
+    const host = load();
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_a" });
+    await flushTasks();
+    const snapshot = (await host.harness.behavior.callRpc("listLifecycle", {})) as {
+      epoch: string;
+      seq: number;
+    };
+    expect(snapshot.seq).toBe(1);
+    expect(typeof snapshot.epoch).toBe("string");
+  });
+
+  // Un-parking is the user's decision about the shelf; the idle age is bb's
+  // and must survive it.
+  it("keeps the idle age when a thread is unsettled", async () => {
+    const host = load();
+    host.bb.storage
+      .database()
+      .prepare(`INSERT INTO thread_lifecycle (thread_id, last_run_ended_at) VALUES (?, ?)`)
+      .run("thr_a", 1234);
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_a" });
+    await host.harness.behavior.callRpc("unsettle", { threadId: "thr_a" });
+    await flushTasks();
+
+    expect(await listRows(host)).toEqual([
+      expect.objectContaining({ threadId: "thr_a", settledAt: null, lastRunEndedAt: 1234 }),
+    ]);
+  });
+
+  // A manual archive, not only the sweep's: a row left behind would park the
+  // thread again the moment it came back.
+  it("forgets an archived thread and reads its timing back on unarchive", async () => {
+    const log = eventLog({
+      thr_a: [{ seq: 1, createdAt: 777, type: "turn/completed" }],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_a" });
+    await flushTasks();
+
+    await host.harness.behavior.emitThreadEvent("thread.archived", {
+      thread: makeThreadResponse({ id: "thr_a" }),
+    });
+    expect(await listRows(host)).toEqual([]);
+
+    await host.harness.behavior.emitThreadEvent("thread.unarchived", {
+      thread: makeThreadResponse({ id: "thr_a", status: "idle" }),
+    });
+    expect(await listRows(host)).toEqual([
+      expect.objectContaining({ threadId: "thr_a", settledAt: null, lastRunEndedAt: 777 }),
+    ]);
+  });
+});
+
 describe("parseCacheWindow", () => {
   it("reads a pair of whole minutes", () => {
     expect(parseCacheWindow("20", "45")).toEqual({

@@ -57,6 +57,8 @@ function render(
     // hands in when the thread's last turn ended.
     rpc: {
       listLifecycle: () => ({
+        epoch: "test",
+        seq: 0,
         rows: Object.entries(turnEnds).map(([id, at]) => endedRow(id, at)),
       }),
     },
@@ -122,7 +124,7 @@ describe("ThreadInbox", () => {
           threads: [thread({ id: "thr_open" })],
           projects: [sidebarProject("proj_1", "bb")],
         },
-        rpc: { listLifecycle: () => ({ rows: [] }) },
+        rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
       },
     );
     const link = screen.getByRole("link");
@@ -170,7 +172,7 @@ describe("ThreadInbox", () => {
           ],
           projects: [sidebarProject("proj_1", "bb")],
         },
-        rpc: { listLifecycle: () => ({ rows: [] }) },
+        rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
       },
     );
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
@@ -226,6 +228,8 @@ describe("parking threads", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_done",
@@ -269,6 +273,8 @@ describe("parking threads", () => {
       // Settled in the store, but still working: it must stay visible.
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_busy",
@@ -302,7 +308,7 @@ describe("parking threads", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
-        listLifecycle: () => ({ rows: [] }),
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
         settle: (input) => {
           settled = (input as { threadId: string }).threadId;
           return { ok: true };
@@ -323,6 +329,8 @@ describe("parking threads", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_snz",
@@ -353,6 +361,8 @@ describe("working duration", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_run",
@@ -394,6 +404,8 @@ describe("working duration", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_idle",
@@ -505,6 +517,8 @@ describe("the cache window", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_idle",
@@ -566,6 +580,8 @@ describe("the cache window", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_idle",
@@ -620,7 +636,7 @@ describe("row context menu", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
-        listLifecycle: () => ({ rows: [] }),
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
         settle: (input) => {
           settled = (input as { threadId: string }).threadId;
           return { ok: true };
@@ -644,7 +660,7 @@ describe("row context menu", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       rpc: {
-        listLifecycle: () => ({ rows: [] }),
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
         snooze: (input) => {
           snoozedUntil = (input as { snoozedUntil: number }).snoozedUntil;
           return { ok: true };
@@ -690,6 +706,8 @@ describe("row context menu", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_done",
@@ -729,6 +747,8 @@ describe("row context menu", () => {
       },
       rpc: {
         listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
           rows: [
             {
               threadId: "thr_snz",
@@ -816,7 +836,7 @@ describe("card metadata", () => {
           } as ProviderRecord,
         ],
       },
-      rpc: { listLifecycle: () => ({ rows: [] }) },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
     });
     const glyph = await screen.findByLabelText("Claude Code");
     const icon = glyph.querySelector("[data-provider-id]");
@@ -968,7 +988,7 @@ describe("unsent drafts", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       sidebarDraftThreadIds: [row.id],
-      rpc: { listLifecycle: () => ({ rows: [] }) },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
     });
   }
 
@@ -1022,7 +1042,7 @@ describe("jump shortcuts", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       sidebarShortcuts: { thr_k: { label: "⌘1", ariaKeyshortcuts: "Meta+1" } },
-      rpc: { listLifecycle: () => ({ rows: [] }) },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
     });
     expect(await screen.findByText("⌘1")).toBeDefined();
     expect(screen.queryByLabelText("Unread thread succeeded")).toBeNull();
@@ -1048,7 +1068,7 @@ describe("pull request badge", () => {
         threads: [thread({ id: "thr_pr" })],
         projects: [sidebarProject("proj_1", "bb")],
       },
-      rpc: { listLifecycle: () => ({ rows: [] }) },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
       sidebarPullRequests: {
         thr_pr: {
           number: 412,
@@ -1098,7 +1118,7 @@ describe("project avatars in the list", () => {
         projects: [sidebarProject("prj_1", "my cool app")],
       },
       rpc: {
-        listLifecycle: () => ({ rows: [] }),
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
         listProjectAvatars: () => ({ rows }),
       } as never,
     });

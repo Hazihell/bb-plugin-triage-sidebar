@@ -4,6 +4,7 @@
 // Putting it on the thread would mean a schema change, a wire change, and a
 // HOST_DAEMON_PROTOCOL_VERSION bump for something only this sidebar
 // understands. Here, uninstalling the plugin removes its state with it.
+import { randomUUID } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -15,6 +16,11 @@ import {
   projectAvatarRpcContract,
 } from "./project-avatar-store";
 import { hostContract } from "./host-contract";
+import {
+  LIFECYCLE_CHANNEL,
+  type LifecycleReapedMessage,
+  type LifecycleRowMessage,
+} from "./lifecycle-sync";
 import {
   forEachLimited,
   isRunningStatus,
@@ -172,9 +178,14 @@ const reapSummarySchema = z.object({
 });
 
 export const triageSidebarRpcContract = defineRpcContract({
+  // The whole table, with the change counter it is current as of. The
+  // sidebar reads this once and on recovery; every change after it arrives
+  // as a numbered row message on the lifecycle channel.
   listLifecycle: {
     input: z.object({}),
     output: z.object({
+      epoch: z.string(),
+      seq: z.number(),
       rows: z.array(
         z.object({
           threadId: z.string(),
@@ -247,8 +258,7 @@ export const triageSidebarRpcContract = defineRpcContract({
   ...projectAvatarRpcContract,
 });
 
-/** Channel the frontend re-reads on. */
-export const LIFECYCLE_CHANNEL = "lifecycle";
+export { LIFECYCLE_CHANNEL } from "./lifecycle-sync";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -633,34 +643,77 @@ export default function plugin(bb: BbPluginApi) {
     };
   };
 
-  const write = (row: StoredLifecycleRow): void => {
+  /**
+   * Which run of this server numbered the changes, and how many it has
+   * published. A client holding a copy from another run — the plugin was
+   * reloaded — cannot trust its counter and reads the table again.
+   */
+  const epoch = randomUUID();
+  let seq = 0;
+
+  /**
+   * Tell every sidebar what one thread's row now is — the row itself, not a
+   * hint to re-read. Every write goes through here, after it lands, so the
+   * message always carries the committed state.
+   */
+  const publishRow = (threadId: string): void => {
+    seq += 1;
+    const message: LifecycleRowMessage = {
+      kind: "row",
+      epoch,
+      seq,
+      threadId,
+      row: readOne(threadId) ?? null,
+    };
+    bb.realtime.publish(LIFECYCLE_CHANNEL, message);
+  };
+
+  /** A row with nothing left in it goes, so the table never fills with them. */
+  const deleteIfEmpty = (threadId: string): void => {
     db.prepare(
-      `INSERT INTO thread_lifecycle
-         (thread_id, settled_at, snoozed_until, snoozed_at, started_working_at,
-          last_run_ended_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `DELETE FROM thread_lifecycle
+         WHERE thread_id = ?
+           AND settled_at IS NULL
+           AND snoozed_until IS NULL
+           AND snoozed_at IS NULL
+           AND started_working_at IS NULL
+           AND last_run_ended_at IS NULL`,
+    ).run(threadId);
+  };
+
+  /**
+   * Write the user's parking decision, and only that.
+   *
+   * The parking columns and bb's timing columns answer to different owners:
+   * the user parks a thread, bb decides when it runs. This touches the first
+   * three and never the other two, so un-parking a thread keeps its idle age.
+   */
+  const writeParking = (
+    threadId: string,
+    parking: {
+      settledAt: number | null;
+      snoozedUntil: number | null;
+      snoozedAt: number | null;
+    },
+  ): void => {
+    db.prepare(
+      `INSERT INTO thread_lifecycle (thread_id, settled_at, snoozed_until, snoozed_at)
+         VALUES (?, ?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET
          settled_at = excluded.settled_at,
          snoozed_until = excluded.snoozed_until,
-         snoozed_at = excluded.snoozed_at,
-         started_working_at = excluded.started_working_at,
-         last_run_ended_at = excluded.last_run_ended_at`,
-    ).run(
-      row.threadId,
-      row.settledAt,
-      row.snoozedUntil,
-      row.snoozedAt,
-      row.startedWorkingAt,
-      row.lastRunEndedAt,
-    );
-    bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId: row.threadId });
+         snoozed_at = excluded.snoozed_at`,
+    ).run(threadId, parking.settledAt, parking.snoozedUntil, parking.snoozedAt);
+    deleteIfEmpty(threadId);
+    publishRow(threadId);
   };
 
+  /** Forget a thread entirely — it was deleted or archived. */
   const clear = (threadId: string): void => {
-    db.prepare(`DELETE FROM thread_lifecycle WHERE thread_id = ?`).run(
-      threadId,
-    );
-    bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId });
+    const deleted = db
+      .prepare(`DELETE FROM thread_lifecycle WHERE thread_id = ?`)
+      .run(threadId);
+    if (deleted.changes > 0) publishRow(threadId);
   };
 
   /**
@@ -699,16 +752,8 @@ export default function plugin(bb: BbPluginApi) {
          started_working_at = excluded.started_working_at,
          last_run_ended_at = excluded.last_run_ended_at`,
     ).run(threadId, timing.startedWorkingAt, timing.lastRunEndedAt);
-    db.prepare(
-      `DELETE FROM thread_lifecycle
-         WHERE thread_id = ?
-           AND settled_at IS NULL
-           AND snoozed_until IS NULL
-           AND snoozed_at IS NULL
-           AND started_working_at IS NULL
-           AND last_run_ended_at IS NULL`,
-    ).run(threadId);
-    bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId });
+    deleteIfEmpty(threadId);
+    publishRow(threadId);
   };
 
   /**
@@ -794,48 +839,42 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(triageSidebarRpcContract, {
     async listLifecycle() {
-      return { rows: readAll() };
+      // Read together, synchronously: no change can land between the rows and
+      // the counter they are current as of.
+      return { epoch, seq, rows: readAll() };
     },
     async settle({ threadId }) {
       // Settling clears any snooze: they are two answers to the same
       // question, and holding both would make the shelf order ambiguous.
-      // The run start survives — it belongs to bb, not to this decision.
-      write({
-        threadId,
+      writeParking(threadId, {
         settledAt: Date.now(),
         snoozedUntil: null,
         snoozedAt: null,
-        startedWorkingAt: readOne(threadId)?.startedWorkingAt ?? null,
-        lastRunEndedAt: readOne(threadId)?.lastRunEndedAt ?? null,
       });
       // After the write, never before: the shelf is the user's decision and
       // it stands even if every part of the cleanup fails. Not awaited — the
       // outcome is published when it is known.
       void reapQuietly(threadId, "settle").then((reaped) => {
-        if (reaped.enabled) {
-          bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId, reaped });
-        }
+        if (!reaped.enabled) return;
+        const message: LifecycleReapedMessage = { kind: "reaped", threadId, reaped };
+        bb.realtime.publish(LIFECYCLE_CHANNEL, message);
       });
       return { ok: true };
     },
     async unsettle({ threadId }) {
-      clear(threadId);
+      writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
       return { ok: true };
     },
     async snooze({ threadId, snoozedUntil }) {
-      const now = Date.now();
-      write({
-        threadId,
+      writeParking(threadId, {
         settledAt: null,
         snoozedUntil,
-        snoozedAt: now,
-        startedWorkingAt: readOne(threadId)?.startedWorkingAt ?? null,
-        lastRunEndedAt: readOne(threadId)?.lastRunEndedAt ?? null,
+        snoozedAt: Date.now(),
       });
       return { ok: true };
     },
     async unsnooze({ threadId }) {
-      clear(threadId);
+      writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
       return { ok: true };
     },
     async autoArchiveStatus() {
@@ -855,14 +894,8 @@ export default function plugin(bb: BbPluginApi) {
       };
     },
     async runAutoArchive() {
-      const result = await runAutoArchiveSweep();
-      // `clear` publishes per thread as it goes, so the sidebar has already
-      // been told about each archived row. This one is for the shelves whose
-      // counts changed without any single row being the reason.
-      if (result.archived.length > 0 || result.unsettled > 0) {
-        bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId: null });
-      }
-      return result;
+      // Every row the sweep changes publishes itself as it goes.
+      return runAutoArchiveSweep();
     },
     async getSettings() {
       const values = await settings.get();
@@ -892,6 +925,22 @@ export default function plugin(bb: BbPluginApi) {
   bb.events.on("thread.deleted", ({ thread }) => {
     clear(thread.id);
   });
+
+  // An archived thread has no card and no shelf, and a parking row left
+  // behind would park it again the moment it came back. This covers the
+  // user's own archives and cascades, not only the sweep's.
+  bb.events.on("thread.archived", ({ thread }) => {
+    clear(thread.id);
+  });
+  // Back from the archive, it needs its idle age again — read from the log,
+  // which kept every turn while the store forgot it.
+  bb.events.on("thread.unarchived", ({ thread }) =>
+    refreshTiming(
+      thread.id,
+      (log) => readTurnTiming(log, thread.id, isRunningStatus(thread.status)),
+      "thread.unarchived",
+    ),
+  );
 
   // bb reports the transitions; the times come from its event log, so every
   // client and every reload measures the same turn from the same instant.
@@ -1340,8 +1389,8 @@ export default function plugin(bb: BbPluginApi) {
         // The thread has spoken since the settle, so the sidebar is already
         // showing it in the inbox. Clearing the stale row makes the two agree
         // for good, instead of leaving a candidate this sweep has to talk
-        // itself out of again on every pass.
-        clear(threadId);
+        // itself out of again on every pass. The idle age stays.
+        writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
         unsettled += 1;
         continue;
       }
