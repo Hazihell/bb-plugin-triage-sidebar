@@ -1580,6 +1580,55 @@ describe("order freeze", () => {
     await waitFor(() => expect(rowTitles()[0]).toContain("Topmost"));
   });
 
+  // Settling from the keyboard unmounts the focused card, and Firefox and
+  // Safari (and jsdom) send no focusout for a removed element. The freeze must
+  // still notice the focus is gone, or nothing re-ranks until the next focus.
+  it("releases when the focused row is removed without a focusout", async () => {
+    const rendered = renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({ id: "thr_low", title: "Lowest", latestAttentionAt: 100 }),
+          thread({ id: "thr_mid", title: "Middle", latestAttentionAt: 200 }),
+          thread({ id: "thr_top", title: "Topmost", latestAttentionAt: 300 }),
+        ],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
+          rows: [
+            {
+              threadId: "thr_top",
+              settledAt: null,
+              snoozedUntil: Date.now() + 3_600_000,
+              snoozedAt: Date.now() - 1_000,
+              startedWorkingAt: null,
+              lastRunEndedAt: null,
+            },
+          ],
+        }),
+        settle: () => ({ ok: true }),
+      },
+    });
+    await listReady();
+    fireEvent.keyDown(document.body, { key: "Tab" });
+    const middle = screen.getByText("Middle").closest("li")!;
+    const settle = within(middle).getByLabelText("Settle thread");
+    settle.focus();
+    fireEvent.click(settle);
+    // The card is gone; jsdom sent no focusout for it.
+    await waitFor(() => expect(screen.queryByText("Middle")).toBeNull());
+    await rendered.emitRealtime("lifecycle", wake);
+    await waitFor(() =>
+      expect(rowTitles().map((text) => text.slice(0, 40))).toEqual([
+        expect.stringContaining("Topmost"),
+        expect.stringContaining("Lowest"),
+      ]),
+    );
+  });
+
   // A click focuses the row's link too, and that focus can sit there for
   // minutes after the pointer has gone: it must not pin the order.
   it("does not hold the order for focus a click left behind", async () => {

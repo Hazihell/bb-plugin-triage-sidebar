@@ -79,7 +79,24 @@ export function useOrderFreeze(containerRef: RefObject<HTMLElement | null>): {
   const reasons = useRef({ pointer: false, focus: false, holds: 0 });
   const releaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Focus can leave without a focusout: Firefox and Safari fire none when the
+  // focused element is removed, as when a row settled from the keyboard
+  // unmounts. So the focus reason is re-checked against the DOM wherever the
+  // freeze is decided, rather than trusted from the last focus event.
+  const focusStillInside = useCallback(() => {
+    const container = containerRef.current;
+    const active = document.activeElement;
+    return (
+      container !== null &&
+      active instanceof HTMLElement &&
+      container.contains(active)
+    );
+  }, [containerRef]);
+
   const update = useCallback(() => {
+    if (reasons.current.focus && !focusStillInside()) {
+      reasons.current.focus = false;
+    }
     const { pointer, focus, holds } = reasons.current;
     if (pointer || focus || holds > 0) {
       if (releaseTimer.current !== null) clearTimeout(releaseTimer.current);
@@ -90,10 +107,19 @@ export function useOrderFreeze(containerRef: RefObject<HTMLElement | null>): {
     if (releaseTimer.current !== null) return;
     releaseTimer.current = setTimeout(() => {
       releaseTimer.current = null;
+      if (reasons.current.focus && !focusStillInside()) {
+        reasons.current.focus = false;
+      }
       const now = reasons.current;
       if (!now.pointer && !now.focus && now.holds === 0) setFrozen(false);
     }, RELEASE_GRACE_MS);
-  }, []);
+  }, [focusStillInside]);
+
+  // A focused row can only disappear in a commit of the list, so every commit
+  // is a chance to notice that the focus the freeze relies on has gone.
+  useEffect(() => {
+    if (reasons.current.focus) update();
+  });
 
   useEffect(() => {
     const container = containerRef.current;
