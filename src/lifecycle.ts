@@ -68,6 +68,19 @@ export function canPark(signals: ThreadActivitySignals): boolean {
 }
 
 /**
+ * Whether the thread said something that counts since it was parked at
+ * `parkedAt`: attention newer than the park, and newer than any attention the
+ * backend marked as not counting.
+ */
+export function spokeSincePark(
+  row: Pick<ThreadLifecycleRow, "quietAttentionAt">,
+  parkedAt: number,
+  latestAttentionAt: number,
+): boolean {
+  return latestAttentionAt > Math.max(parkedAt, row.quietAttentionAt ?? parkedAt);
+}
+
+/**
  * Which shelf a thread belongs on right now.
  *
  * Order matters. Live work and a raised hand always win, so a parked thread
@@ -82,9 +95,8 @@ export function resolveShelf(
   if (row === undefined) return "active";
   if (!canPark(signals)) return "active";
 
-  // Whether the thread said something after `at` that counts.
-  const spokeSince = (at: number) =>
-    signals.latestAttentionAt > Math.max(at, row.quietAttentionAt ?? at);
+  const spokeSince = (parkedAt: number) =>
+    spokeSincePark(row, parkedAt, signals.latestAttentionAt);
 
   if (row.snoozedUntil !== null) {
     // A timer that has elapsed wakes the thread; so does anything that

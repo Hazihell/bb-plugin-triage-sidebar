@@ -9,6 +9,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   resolveSettledSweepAction,
+  spokeSincePark,
   type SettledSweepAction,
   type ThreadActivitySignals,
 } from "./lifecycle";
@@ -308,6 +309,13 @@ const DAY_MS = 24 * HOUR_MS;
 /** How long one worktree sweep may take on its host. */
 const REAP_HOST_TIMEOUT_MS = 60_000;
 
+/**
+ * The longest a reap's window is believed open: the host sweep's deadline
+ * plus as long again for listing threads and closing terminals. A window a
+ * reload left open is read, and on the next load closed, as ending here.
+ */
+export const REAP_WINDOW_MAX_MS = 2 * REAP_HOST_TIMEOUT_MS;
+
 /** How long after load the turn-timing backfill starts. */
 export const BACKFILL_DELAY_MS = 2_000;
 const THREAD_PAGE_SIZE = 200;
@@ -506,6 +514,12 @@ export function sweepThreadTitle(thread: {
 export default function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, migrations);
+  // A reap cut short by an unload never closed its window; close it where it
+  // could have ended at the latest, so it cannot swallow later command ends.
+  db.prepare(
+    `UPDATE thread_lifecycle SET reap_ended_at = reap_started_at + ?
+       WHERE reap_started_at IS NOT NULL AND reap_ended_at IS NULL`,
+  ).run(REAP_WINDOW_MAX_MS);
 
   const settings = bb.settings.define({
     autoArchiveEnabled: {
@@ -952,36 +966,30 @@ export default function plugin(bb: BbPluginApi) {
     ),
   );
 
-  /** Open (end null) or close the reap window on every thread a reap covers. */
-  const markReapWindow = (
-    threadIds: readonly string[],
-    startedAt: number,
-    endedAt: number | null,
-  ): void => {
-    const statement = db.prepare(
-      `INSERT INTO thread_lifecycle (thread_id, reap_started_at, reap_ended_at)
-         VALUES (?, ?, ?)
-       ON CONFLICT(thread_id) DO UPDATE SET
-         reap_started_at = excluded.reap_started_at,
-         reap_ended_at = excluded.reap_ended_at`,
-    );
-    for (const threadId of threadIds) statement.run(threadId, startedAt, endedAt);
-  };
+  // Only rows that already exist hold a window. A thread with no row is not
+  // parked, so there is nothing for a window to keep it on.
+  const openReapWindow = db.prepare(
+    `UPDATE thread_lifecycle SET reap_started_at = ?, reap_ended_at = NULL
+       WHERE thread_id = ?`,
+  );
+  // Only the window this reap opened: an undo cleared it, and a later settle
+  // opened its own.
+  const closeReapWindow = db.prepare(
+    `UPDATE thread_lifecycle SET reap_ended_at = ?
+       WHERE thread_id = ? AND reap_started_at = ? AND reap_ended_at IS NULL`,
+  );
+  const readReapWindow = db.prepare(
+    `SELECT reap_started_at, reap_ended_at FROM thread_lifecycle WHERE thread_id = ?`,
+  );
 
   /** Whether a background task that ended at `endedAt` was stopped by a reap. */
   const endedInReap = (threadId: string, endedAt: number): boolean => {
-    const window = db
-      .prepare(
-        `SELECT reap_started_at, reap_ended_at FROM thread_lifecycle WHERE thread_id = ?`,
-      )
-      .get(threadId) as
+    const window = readReapWindow.get(threadId) as
       | { reap_started_at: number | null; reap_ended_at: number | null }
       | undefined;
     if (window?.reap_started_at == null) return false;
-    return (
-      endedAt >= window.reap_started_at &&
-      endedAt <= (window.reap_ended_at ?? Number.POSITIVE_INFINITY) + REAP_GRACE_MS
-    );
+    const end = window.reap_ended_at ?? window.reap_started_at + REAP_WINDOW_MAX_MS;
+    return endedAt >= window.reap_started_at && endedAt <= end + REAP_GRACE_MS;
   };
 
   /**
@@ -999,7 +1007,7 @@ export default function plugin(bb: BbPluginApi) {
     if (
       row !== undefined &&
       parkedAt !== null &&
-      thread.latestAttentionAt <= Math.max(parkedAt, row.quietAttentionAt ?? parkedAt)
+      !spokeSincePark(row, parkedAt, thread.latestAttentionAt)
     ) {
       parkedAtTurnStart.add(thread.id);
     } else {
@@ -1016,7 +1024,9 @@ export default function plugin(bb: BbPluginApi) {
    * reads to the shelves as the thread speaking up. Only a command that ended
    * inside a reap's window is discounted: one that finished by itself, and
    * the agent reporting on it, is the thread speaking up and brings it back.
-   * So does anything else the turn does — a question, more work.
+   * So does a background command still running once the turn ends — the
+   * agent restarted its dev server — because nothing would stop it again.
+   * A question or other live work brings it back on its own.
    */
   const discountBackgroundWake = async (thread: {
     id: string;
@@ -1030,10 +1040,13 @@ export default function plugin(bb: BbPluginApi) {
         lifetime.signal,
       );
       if (wokeBy === null || unloaded() || !endedInReap(thread.id, wokeBy)) return;
+      const now = buildThreadIndex(await listLiveThreads()).get(thread.id);
+      if (unloaded() || now === undefined) return;
+      if (now.activity.activeBackgroundCommandCount > 0) return;
     } catch (error) {
       if (unloaded()) return;
       bb.log.warn(
-        `parking: could not read how ${thread.id}'s turn started (${String(error)})`,
+        `parking: could not tell what woke ${thread.id} or what it left running (${String(error)})`,
       );
       return;
     }
@@ -1262,7 +1275,7 @@ export default function plugin(bb: BbPluginApi) {
     // reap's doing, which is what keeps the agent's answer to it from
     // un-parking the thread.
     const reapStartedAt = Date.now();
-    markReapWindow(tree, reapStartedAt, null);
+    for (const threadId of tree) openReapWindow.run(reapStartedAt, threadId);
     try {
       // One entry per environment, so a tree sharing one worktree — the usual
       // case — sweeps it once.
@@ -1356,7 +1369,12 @@ export default function plugin(bb: BbPluginApi) {
       }
       return summary;
     } finally {
-      if (!unloaded()) markReapWindow(tree, reapStartedAt, Date.now());
+      if (!unloaded()) {
+        const reapEndedAt = Date.now();
+        for (const threadId of tree) {
+          closeReapWindow.run(reapEndedAt, threadId, reapStartedAt);
+        }
+      }
     }
   };
 

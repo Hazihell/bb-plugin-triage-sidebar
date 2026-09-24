@@ -17,6 +17,7 @@ import plugin, {
   parseCacheWindow,
   nextAutoArchiveRunAt,
   BACKFILL_DELAY_MS,
+  REAP_WINDOW_MAX_MS,
   type AutoArchiveSweepResult,
   type ReapSummary,
   type StoredAvatarRow,
@@ -400,9 +401,14 @@ describe("turn timing", () => {
     async function settleThenWake({
       commandEndedAfterReap,
       accepted = false,
+      commandsRunningAfter = 0,
+      afterSettle,
     }: {
       commandEndedAfterReap: number;
       accepted?: boolean;
+      /** Background commands bb reports once the woken turn has ended. */
+      commandsRunningAfter?: number;
+      afterSettle?: (host: FakePluginHost) => void;
     }) {
       const log = eventLog({
         thr_dev: [
@@ -413,11 +419,22 @@ describe("turn timing", () => {
       });
       // A live thread list, so the settle's reap runs and opens its window.
       const host = load({
-        sdk: { threads: { ...liveThreads([listRow({ id: "thr_dev" })]), events: log.sdk } },
+        sdk: {
+          threads: {
+            ...liveThreads([
+              listRow({
+                id: "thr_dev",
+                activity: { ...listRow({ id: "x" }).activity, activeBackgroundCommandCount: commandsRunningAfter },
+              }),
+            ]),
+            events: log.sdk,
+          },
+        },
       });
       await host.harness.behavior.callRpc("settle", { threadId: "thr_dev" });
       await flushTasks();
       const settledAt = (await listRows(host))[0]!.settledAt!;
+      afterSettle?.(host);
 
       const ended = Date.now() + commandEndedAfterReap;
       log.push("thr_dev", { seq: 4, createdAt: ended, type: "item/backgroundTask/completed" });
@@ -465,6 +482,72 @@ describe("turn timing", () => {
       const { row } = await settleThenWake({ commandEndedAfterReap: 0, accepted: true });
       expect(row?.quietAttentionAt).toBeNull();
     });
+
+    // The agent restarted its dev server in the woken turn. Nothing would
+    // stop it again, so the thread must come back rather than hide it.
+    it("brings the thread back when the woken turn leaves a command running", async () => {
+      const { row } = await settleThenWake({
+        commandEndedAfterReap: 0,
+        commandsRunningAfter: 1,
+      });
+      expect(row?.quietAttentionAt).toBeNull();
+    });
+
+    // A reload mid-reap leaves the window without an end. It must not stay
+    // open forever and swallow a command that later finishes on its own.
+    it("reads a window left open as ending at the longest a reap runs", async () => {
+      const { row } = await settleThenWake({
+        commandEndedAfterReap: 0,
+        afterSettle: (host) =>
+          host.bb.storage
+            .database()
+            .prepare(
+              `UPDATE thread_lifecycle SET reap_started_at = ?, reap_ended_at = NULL
+                 WHERE thread_id = ?`,
+            )
+            .run(Date.now() - REAP_WINDOW_MAX_MS - 60_000, "thr_dev"),
+      });
+      expect(row?.quietAttentionAt).toBeNull();
+    });
+  });
+
+  it("closes a reap window left open by an unload on the next load", async () => {
+    const host = load();
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_cut" });
+    const db = host.bb.storage.database();
+    db.prepare(
+      `UPDATE thread_lifecycle SET reap_started_at = ?, reap_ended_at = NULL WHERE thread_id = ?`,
+    ).run(T, "thr_cut");
+
+    const next = await host.harness.lifecycle.reload(plugin);
+
+    expect(
+      next.bb.storage
+        .database()
+        .prepare(`SELECT reap_ended_at FROM thread_lifecycle WHERE thread_id = ?`)
+        .get("thr_cut"),
+    ).toEqual({ reap_ended_at: T + REAP_WINDOW_MAX_MS });
+  });
+
+  // A thread with no row is not parked; the reap's window is no reason to
+  // give it one, and a window must not outlive the park it belonged to.
+  it("leaves no row behind for a child the reap covered, or after an undo", async () => {
+    const host = load({
+      sdk: {
+        threads: liveThreads([
+          listRow({ id: "thr_top" }),
+          listRow({ id: "thr_kid", parentThreadId: "thr_top" }),
+        ]),
+      },
+    });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_top" });
+    await flushTasks();
+    expect((await listRows(host)).map((row) => row.threadId)).toEqual(["thr_top"]);
+
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_top" });
+    await host.harness.behavior.callRpc("unsettle", { threadId: "thr_top" });
+    await flushTasks();
+    expect(await listRows(host)).toEqual([]);
   });
 
   // Events missed while the plugin was not running — a reload, a reinstall —
