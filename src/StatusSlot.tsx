@@ -14,7 +14,7 @@ import {
   hasStatusGlyph,
   WAITING_COLOR,
 } from "./StatusGlyph";
-import { isTurnRunning } from "./useLifecycle";
+import { isTurnRunning, isWorking } from "./useLifecycle";
 import { elapsedLabel, idleAgeLabel } from "./relative-time";
 import { cn } from "./lib/utils";
 import {
@@ -99,18 +99,18 @@ export function StatusOrTime({
   const liveNow = useClock("second", isRunning && startedWorkingAt !== null);
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
   const rowStatus = useSidebarThreadRowStatus(thread.id);
-  // Another plugin's row status goes exactly where bb puts it: in the draft
-  // glyph's place, with the draft's precedence, so it never hides a question,
-  // a failure or an unread result.
+  // The draft ranks against ANY live work, as in bb: a thread whose turn has
+  // ended but whose dev server still runs shows the working pencil. Only the
+  // clock asks the narrower question of whether a turn is running.
   const indicator = composeIndicator(
     thread.indicator,
-    hasUnsubmittedDraft || rowStatus !== null,
-    isRunning,
+    hasUnsubmittedDraft,
+    isWorking(thread),
   );
   const isDraftPlace = indicator === "draft" || indicator === "working-draft";
 
   let glyph: ReactNode = null;
-  if (isDraftPlace && rowStatus !== null) {
+  if (rowStatus !== null && rowStatusIsVisible(indicator)) {
     glyph = <RowStatusGlyph status={rowStatus} />;
   } else if (hasStatusGlyph(indicator)) {
     glyph = (
@@ -208,19 +208,45 @@ function Clock({
 }
 
 /**
+ * Whether another plugin's row status shows, by bb's own rule: everywhere
+ * except over a running turn, a failure, or a question. It is not ranked as
+ * a draft; it simply yields to the three states the user must not miss.
+ */
+function rowStatusIsVisible(
+  indicator: ReturnType<typeof composeIndicator>,
+): boolean {
+  return (
+    indicator !== "runtime" &&
+    indicator !== "unread-error" &&
+    indicator !== "waiting-for-input"
+  );
+}
+
+/**
  * A status another plugin set on this row, drawn with bb's own treatment for
- * its tone: a running status shimmers, a finished one is static in the
- * success or failure colour, and anything else is neutral.
+ * its tone: a running status pulses and shimmers in the success colour, a
+ * finished one is static in the success or failure colour, and anything else
+ * is neutral.
  */
 function RowStatusGlyph({ status }: { status: PluginSidebarThreadRowStatus }) {
   const tone = status.tone ?? "default";
+  if (tone === "running") {
+    return (
+      <span className="inline-flex size-3.5 items-center justify-center text-success motion-safe:animate-pulse">
+        <HostIcon
+          name={status.icon}
+          aria-label={status.label}
+          className="size-3.5 shrink-0 animate-shine-icon"
+        />
+      </span>
+    );
+  }
   return (
     <HostIcon
       name={status.icon}
       aria-label={status.label}
       className={cn(
         "size-3.5 shrink-0",
-        tone === "running" && "animate-shine-icon text-success",
         tone === "success" && "text-success-foreground",
         tone === "error" && "text-destructive",
         tone === "default" && "text-muted-foreground",

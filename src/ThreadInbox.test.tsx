@@ -1204,9 +1204,32 @@ describe("unsent drafts", () => {
     expect(screen.queryByLabelText("Thread working")).toBeNull();
   });
 
-  // Another plugin's row status goes where bb draws it: in the draft glyph's
-  // place, with the draft's precedence.
-  it("draws another plugin's row status in the draft's place", async () => {
+  // A thread whose turn has ended but whose terminal still runs is live work
+  // to bb, which shows the working pencil; the turn-only rule is the clock's.
+  it("shows the working pencil beside background work", async () => {
+    renderWithDraft(
+      thread({
+        id: "thr_bgd",
+        indicator: "background-command",
+        indicatorLabel: "Background command running",
+        activity: {
+          workflows: 0,
+          backgroundAgents: 0,
+          backgroundCommands: 1,
+          planMode: 0,
+          goals: 0,
+        },
+      }),
+    );
+    expect(
+      await screen.findByLabelText("Thread working with unsubmitted draft"),
+    ).toBeDefined();
+    expect(screen.queryByLabelText("Background command running")).toBeNull();
+  });
+
+  // Another plugin's row status follows bb's rule: shown over anything but a
+  // running turn, a failure or a question — including over a draft.
+  it("draws another plugin's row status over a draft", async () => {
     renderSlot(inbox, listProps, {
       sidebarThreads: {
         status: "ready",
@@ -1221,7 +1244,48 @@ describe("unsent drafts", () => {
     });
     const glyph = await screen.findByLabelText("Deploying");
     expect(glyph.getAttribute("class")).toContain("animate-shine-icon");
+    // bb's running treatment: a pulsing wrapper in the success colour.
+    expect(glyph.parentElement?.className).toContain("motion-safe:animate-pulse");
     expect(screen.queryByLabelText("Thread has unsubmitted draft")).toBeNull();
+  });
+
+  function renderWithRowStatus(row: PluginSidebarThread) {
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [row],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarRowStatuses: { [row.id]: { icon: "Zap", label: "Deploying" } },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
+    });
+  }
+
+  // Not ranked as a draft: an unread result does not hide it.
+  it("shows a row status over an unread result", async () => {
+    renderWithRowStatus(
+      thread({
+        id: "thr_ru",
+        indicator: "unread-success",
+        indicatorLabel: "Unread thread succeeded",
+      }),
+    );
+    expect(await screen.findByLabelText("Deploying")).toBeDefined();
+    expect(screen.queryByLabelText("Unread thread succeeded")).toBeNull();
+  });
+
+  // And not a draft either: a running turn keeps its spinner.
+  it("keeps the spinner over a row status while a turn runs", async () => {
+    renderWithRowStatus(
+      thread({
+        id: "thr_rr",
+        status: "active",
+        indicator: "runtime",
+        indicatorLabel: "Thread working",
+      }),
+    );
+    expect(await screen.findByLabelText("Thread working")).toBeDefined();
+    expect(screen.queryByLabelText("Deploying")).toBeNull();
   });
 
   it("never lets a row status hide a question", async () => {
