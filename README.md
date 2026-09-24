@@ -54,8 +54,9 @@ Movement that the user cannot follow would be worse than no ranking at all, so
 two rules govern it. The list freezes its order while your pointer is over it,
 a row holds keyboard focus, or a menu opened from a row is still open — no row
 may slide out from under a cursor on its way to a click. During a freeze a row
-you settle or archive leaves at once, and a thread that arrives (a snooze that
-woke, a new thread) waits at the end of its shelf. When the freeze lifts, a
+that leaves the shelf — settled or archived, by you, another window or the
+sweep — leaves at once and the rows below close the gap, and a thread that
+arrives (a snooze that woke, a new thread) waits at the end of its shelf. When the freeze lifts, a
 moment after the pointer leaves, each row that changed rank slides once, over
 150ms, from where it was to where it now belongs, so you see a thread travel
 instead of a different list. Data arriving never slides anything: not the

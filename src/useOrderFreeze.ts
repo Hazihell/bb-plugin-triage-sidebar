@@ -17,7 +17,11 @@ const RELEASE_GRACE_MS = 200;
  * The displayed order of one list while it is frozen.
  *
  * Rows already on screen keep the places they had. A row that left (settled,
- * archived) leaves at once, because the user asked for that or it is gone. A
+ * archived — by this user, another window or the sweep) leaves at once and
+ * the rows below close up: it is gone, and a hole held open for it would be
+ * a blank the user has to read around. That is the one way rows move under a
+ * frozen pointer, and it is rare, because the sweep only archives threads
+ * already on the collapsed Settled shelf. A
  * row that arrived (a snooze that woke, a new thread) goes at the END, below
  * everything the user might be about to click, and takes its real place when
  * the freeze ends.
