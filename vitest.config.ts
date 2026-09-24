@@ -6,5 +6,6 @@ export default defineConfig({
     name: "bb-plugin-triage-sidebar",
     include: ["**/*.test.{ts,tsx}"],
     exclude: ["node_modules/**"],
+    setupFiles: ["./vitest.setup.ts"],
   },
 });

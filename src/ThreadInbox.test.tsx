@@ -67,6 +67,16 @@ function render(
 
 afterEach(cleanup);
 
+/**
+ * The list proper, once the parking store has been read: until then a first
+ * launch shows a skeleton rather than rows it cannot yet rank.
+ */
+async function listReady(): Promise<void> {
+  await waitFor(() =>
+    expect(screen.queryByRole("status", { name: "Loading threads" })).toBeNull(),
+  );
+}
+
 // The anchor is a full-bleed overlay, so the row containers carry the text.
 function rowTitles(): string[] {
   return screen.getAllByRole("listitem").map((row) => row.textContent ?? "");
@@ -80,18 +90,19 @@ describe("triage-sidebar registration", () => {
 });
 
 describe("ThreadInbox", () => {
-  it("lists the most recently needed thread first", () => {
+  it("lists the most recently needed thread first", async () => {
     render([
       thread({ id: "a", title: "Quiet", latestAttentionAt: 1 }),
       thread({ id: "b", title: "Touched", latestAttentionAt: 2 }),
     ]);
+    await listReady();
     expect(rowTitles()[0]).toContain("Touched");
     expect(rowTitles()[1]).toContain("Quiet");
   });
 
   // The sort's headline promise, end to end: a question waiting for an answer
   // outranks a thread that was busy seconds ago.
-  it("floats a thread blocked on the user to the top", () => {
+  it("floats a thread blocked on the user to the top", async () => {
     render([
       thread({ id: "a", title: "Busy", latestAttentionAt: 9_000 }),
       thread({
@@ -101,19 +112,21 @@ describe("ThreadInbox", () => {
         hasPendingInteraction: true,
       }),
     ]);
+    await listReady();
     expect(rowTitles()[0]).toContain("Asking");
   });
 
   // The DOM contract behind numbered thread shortcuts and thread.next/previous.
   // A plugin that drops these attributes silently breaks nine host shortcuts.
-  it("marks every row as a host shortcut target", () => {
+  it("marks every row as a host shortcut target", async () => {
     render([thread({ id: "thr_x" })]);
+    await listReady();
     const row = screen.getByRole("link");
     expect(row.hasAttribute("data-sidebar-thread-shortcut-target")).toBe(true);
     expect(row.getAttribute("data-sidebar-thread-id")).toBe("thr_x");
   });
 
-  it("opens a thread on click and closes the mobile drawer", () => {
+  it("opens a thread on click and closes the mobile drawer", async () => {
     let navigated = 0;
     const rendered = renderSlot(
       inbox,
@@ -127,6 +140,9 @@ describe("ThreadInbox", () => {
         rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
       },
     );
+    await listReady();
+    await listReady();
+    await listReady();
     const link = screen.getByRole("link");
     // A real link: the host routes the plain click in place, so the row lets
     // it through rather than opening the thread itself. The host's router is
@@ -152,8 +168,9 @@ describe("ThreadInbox", () => {
     expect(navigated).toBe(1);
   });
 
-  it("opens in a split with the platform modifier held", () => {
+  it("opens in a split with the platform modifier held", async () => {
     const rendered = render([thread({ id: "thr_split" })]);
+    await listReady();
     expect(fireEvent.click(screen.getByRole("link"), { metaKey: true })).toBe(
       false,
     );
@@ -164,18 +181,19 @@ describe("ThreadInbox", () => {
     });
   });
 
-  it("separates pinned threads from the inbox", () => {
+  it("separates pinned threads from the inbox", async () => {
     render([
       thread({ id: "a", title: "Plain" }),
       thread({ id: "b", title: "Stuck", isPinned: true }),
     ]);
+    await listReady();
     const pinned = screen.getByRole("region", { name: /pinned/i });
     expect(within(pinned).getByText("Stuck")).toBeDefined();
   });
 
   // Search moved to the host's quick palette, and the prop that carried the
   // old field's text is always "". A stale value must not hide rows.
-  it("ignores the deprecated search query", () => {
+  it("ignores the deprecated search query", async () => {
     renderSlot(
       inbox,
       { ...listProps, searchQuery: "sidebar" },
@@ -191,20 +209,24 @@ describe("ThreadInbox", () => {
         rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
       },
     );
+    await listReady();
+    await listReady();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
   });
 
-  it("ships no search field of its own", () => {
+  it("ships no search field of its own", async () => {
     render([thread({ id: "a" })]);
+    await listReady();
     expect(screen.queryByLabelText("Search threads")).toBeNull();
   });
 
-  it("ships no new-thread button of its own", () => {
+  it("ships no new-thread button of its own", async () => {
     render([thread({ id: "a" })]);
+    await listReady();
     expect(screen.queryByLabelText("New thread")).toBeNull();
   });
 
-  it("scopes to one project", () => {
+  it("scopes to one project", async () => {
     render(
       [
         thread({ id: "a", title: "In bb", projectId: "proj_1" }),
@@ -215,6 +237,7 @@ describe("ThreadInbox", () => {
         sidebarProject("proj_2", "other"),
       ],
     );
+    await listReady();
     // Radix opens on keyboard too, which jsdom can drive without pointer
     // capture. Enter opens the list; the option click picks the scope.
     fireEvent.keyDown(screen.getByLabelText(/Project scope/), { key: "Enter" });
@@ -223,13 +246,15 @@ describe("ThreadInbox", () => {
     expect(screen.getByText("In other")).toBeDefined();
   });
 
-  it("hides archived threads", () => {
+  it("hides archived threads", async () => {
     render([thread({ id: "a", isArchived: true })]);
+    await listReady();
     expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   });
 
-  it("reports an empty inbox", () => {
+  it("reports an empty inbox", async () => {
     render([]);
+    await listReady();
     expect(screen.getByText("No threads yet")).toBeDefined();
   });
 });
@@ -1180,8 +1205,9 @@ describe("jump shortcuts", () => {
     );
   });
 
-  it("shows no key when the modifier is up", () => {
+  it("shows no key when the modifier is up", async () => {
     render([thread({ id: "thr_k" })]);
+    await listReady();
     expect(
       screen.getByRole("link").hasAttribute("aria-keyshortcuts"),
     ).toBe(false);
@@ -1413,5 +1439,83 @@ describe("order freeze", () => {
     screen.getAllByRole("link")[1]!.focus();
     await rendered.emitRealtime("lifecycle", wake);
     await waitFor(() => expect(rowTitles()[0]).toContain("Topmost"));
+  });
+});
+
+describe("first paint", () => {
+  const threads = [
+    thread({ id: "thr_open", title: "Open work", latestAttentionAt: 200 }),
+    thread({ id: "thr_done", title: "Finished", latestAttentionAt: 100 }),
+  ];
+  // Never answers: whatever frame 1 shows came from the snapshot.
+  const neverRead = () => new Promise<never>(() => {});
+
+  function renderFirstFrame() {
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads,
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: { listLifecycle: neverRead, listProjectAvatars: neverRead },
+    });
+  }
+
+  it("paints last session's shelves on the first frame", () => {
+    localStorage.setItem(
+      "bb-plugin:triage-sidebar:lifecycle:v1",
+      JSON.stringify({
+        epoch: "old",
+        seq: 4,
+        rows: [{ ...endedRow("thr_done", 50), settledAt: 150 }],
+      }),
+    );
+    renderFirstFrame();
+    expect(screen.queryByRole("status", { name: "Loading threads" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Settled" })).toBeDefined();
+    expect(rowTitles()).toEqual([expect.stringContaining("Open work")]);
+  });
+
+  it("paints last session's avatars on the first frame", () => {
+    localStorage.setItem(
+      "bb-plugin:triage-sidebar:lifecycle:v1",
+      JSON.stringify({ epoch: "old", seq: 0, rows: [] }),
+    );
+    localStorage.setItem(
+      "bb-plugin:triage-sidebar:avatars:v1",
+      JSON.stringify([
+        {
+          projectId: "proj_1",
+          customKind: "emoji",
+          customColor: null,
+          customInitials: null,
+          customEmoji: "🐙",
+          customImage: null,
+          faviconImage: null,
+          remoteImage: null,
+        },
+      ]),
+    );
+    renderFirstFrame();
+    expect(screen.getAllByText("🐙").length).toBeGreaterThan(0);
+  });
+
+  // With nothing to rank by, the list would appear unshelved and re-sort a
+  // moment later. It shows a still placeholder instead, and no rows.
+  it("shows a skeleton, never an unshelved list, with no snapshot", () => {
+    renderFirstFrame();
+    expect(screen.getByRole("status", { name: "Loading threads" })).toBeDefined();
+    expect(screen.queryByText("Open work")).toBeNull();
+  });
+
+  it("keeps a snapshot of what the server said for the next launch", async () => {
+    render(threads, undefined, { thr_open: 42 });
+    await listReady();
+    await waitFor(() => {
+      const saved = JSON.parse(
+        localStorage.getItem("bb-plugin:triage-sidebar:lifecycle:v1") ?? "null",
+      );
+      expect(saved?.rows).toEqual([endedRow("thr_open", 42)]);
+    });
   });
 });

@@ -31,6 +31,7 @@ import {
   visibleInboxThreads,
 } from "./inbox";
 import { useFlipReorder } from "./useFlipReorder";
+import { ListSkeleton } from "./ListStates";
 import { holdOrder, OrderHoldContext, useOrderFreeze } from "./useOrderFreeze";
 
 const ALL_PROJECTS = "__all__";
@@ -139,7 +140,7 @@ export function ThreadInbox({
   // host's threads or the parking store landing, or a different project.
   // Order changes across one of these are adopted at once, frozen or not, and
   // never slide.
-  const loadKey = `${status}|${lifecycle.status}|${scope}`;
+  const loadKey = `${status}|${lifecycle.source}|${lifecycle.status}|${scope}`;
 
   // While frozen, each shelf keeps the order it last showed (see holdOrder);
   // the ids it showed are recorded after every commit.
@@ -270,7 +271,10 @@ export function ThreadInbox({
         className="relative min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
       >
         <OrderHoldContext.Provider value={orderHold}>
-        {status === "loading" ? null : status === "error" ? (
+        {status === "loading" ||
+        (lifecycle.source === "none" && lifecycle.status === "loading") ? (
+          <ListSkeleton />
+        ) : status === "error" ? (
           <p
             role="status"
             className="px-2 py-6 text-center text-xs text-muted-foreground"

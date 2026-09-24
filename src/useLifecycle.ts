@@ -8,6 +8,7 @@ import {
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import type { triageSidebarRpcContract } from "./server";
 import { childrenOf } from "./inbox";
+import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
 import {
   applyRowMessage,
   describeReap,
@@ -112,12 +113,23 @@ export function isBusy(
 
 export type LifecycleLoadStatus = "loading" | "ready" | "error";
 
+/**
+ * Where the rows on screen came from: nowhere yet, the snapshot this client
+ * kept from its last session, or the server.
+ */
+export type LifecycleSource = "none" | "snapshot" | "live";
+
 export interface LifecycleApi {
   /**
    * Whether the plugin's own store has been read. Until it has, every thread
    * classifies as active and has no idle age; on "error", `retry` reads again.
    */
   status: LifecycleLoadStatus;
+  /**
+   * "snapshot" means the rows are last session's, painted so the first frame
+   * is the real list; the server's replace them as soon as they arrive.
+   */
+  source: LifecycleSource;
   retry(): void;
   shelfFor(thread: PluginSidebarThread): ThreadShelf;
   canPark(thread: PluginSidebarThread): boolean;
@@ -169,17 +181,22 @@ export function useLifecycle(
   threads: readonly PluginSidebarThread[],
 ): LifecycleApi {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
-  const [sync, setSync] = useState<SyncState | null>(null);
+  const [seed] = useState(readLifecycleSnapshot);
+  const [sync, setSync] = useState<SyncState | null>(seed);
   const [status, setStatus] = useState<LifecycleLoadStatus>("loading");
+  const [source, setSource] = useState<LifecycleSource>(
+    seed === null ? "none" : "snapshot",
+  );
   const [now, setNow] = useState(() => Date.now());
 
   // The copy lives in a ref as well as in state: a realtime message has to
   // know synchronously whether it left the copy stale, and a state updater
   // runs too late to say.
-  const syncRef = useRef<SyncState | null>(null);
+  const syncRef = useRef<SyncState | null>(seed);
   const commit = useCallback((next: SyncState) => {
     syncRef.current = next;
     setSync(next);
+    writeLifecycleSnapshot(next);
   }, []);
 
   // Non-null while a full read is in flight: messages that arrive meanwhile
@@ -210,6 +227,7 @@ export function useLifecycle(
     const { state, stale } = stateFromSnapshotAndBuffer(snapshot, buffered);
     commit(state);
     setStatus("ready");
+    setSource("live");
     // A gap among the buffered messages: one was lost in flight.
     if (stale) void resync();
   }, [commit, rpc]);
@@ -329,6 +347,7 @@ export function useLifecycle(
 
     return {
       status,
+      source,
       retry: () => void resync(),
       shelfFor: (thread) =>
         resolveShelf(rows.get(thread.id), signalsFor(thread), now),
@@ -373,7 +392,46 @@ export function useLifecycle(
           "Couldn't wake the thread",
         ),
     };
-  }, [commit, now, resync, rows, rpc, status, threads]);
+  }, [commit, now, resync, rows, rpc, source, status, threads]);
 }
 
 const EMPTY_ROWS: ReadonlyMap<string, ThreadLifecycleRow> = new Map();
+
+const SNAPSHOT_KEY = "lifecycle:v1";
+
+/**
+ * Written after every applied change, so the snapshot is always the last list
+ * this client showed. Coalesced to one write per task: a full read and the
+ * messages buffered behind it land together.
+ */
+let pendingSnapshot: SyncState | null = null;
+function writeLifecycleSnapshot(state: SyncState): void {
+  const scheduled = pendingSnapshot !== null;
+  pendingSnapshot = state;
+  if (scheduled) return;
+  setTimeout(() => {
+    const latest = pendingSnapshot;
+    pendingSnapshot = null;
+    if (latest === null) return;
+    writeSnapshot(SNAPSHOT_KEY, {
+      epoch: latest.epoch,
+      seq: latest.seq,
+      rows: [...latest.rows.values()],
+    });
+  }, 0);
+}
+
+function readLifecycleSnapshot(): SyncState | null {
+  return readSnapshot(SNAPSHOT_KEY, (value) => {
+    if (!isRecord(value) || !Array.isArray(value.rows)) return null;
+    if (typeof value.epoch !== "string" || typeof value.seq !== "number") {
+      return null;
+    }
+    const rows = new Map<string, ThreadLifecycleRow>();
+    for (const row of value.rows) {
+      if (!isRecord(row) || typeof row.threadId !== "string") return null;
+      rows.set(row.threadId, row as unknown as ThreadLifecycleRow);
+    }
+    return { epoch: value.epoch, seq: value.seq, rows };
+  });
+}

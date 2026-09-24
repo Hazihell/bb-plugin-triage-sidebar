@@ -5,6 +5,7 @@ import type {
   StoredAvatarRow,
   triageSidebarRpcContract,
 } from "./server";
+import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
 
 export interface ProjectAvatarsApi {
   /**
@@ -52,8 +53,10 @@ export interface ProjectAvatarsApi {
  */
 export function useProjectAvatars(): ProjectAvatarsApi {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
+  // Seeded from the last session, so the first frame has the real avatars
+  // rather than monograms that turn into images a moment later.
   const [rows, setRows] = useState<ReadonlyMap<string, StoredAvatarRow>>(
-    () => new Map(),
+    () => readAvatarSnapshot() ?? new Map(),
   );
 
   // Responses can land out of order (a mutation's signal racing another
@@ -74,6 +77,7 @@ export function useProjectAvatars(): ProjectAvatarsApi {
     }
     if (seq !== requestSeq.current) return;
     setRows(new Map(result.rows.map((row) => [row.projectId, row])));
+    writeAvatarSnapshot(result.rows);
   }, [rpc]);
 
   useEffect(() => {
@@ -110,4 +114,46 @@ export function useProjectAvatars(): ProjectAvatarsApi {
     }),
     [rows, rpc],
   );
+}
+
+const SNAPSHOT_KEY = "avatars:v1";
+
+/**
+ * The most image data the snapshot may hold. localStorage is one small quota
+ * shared with bb itself, and an avatar image may be up to 256 KB, so the
+ * snapshot keeps the smallest images first and drops the rest: those
+ * projects paint a monogram for a moment on launch, as before.
+ */
+const IMAGE_BUDGET_CHARS = 512 * 1024;
+const IMAGE_FIELDS = ["customImage", "faviconImage", "remoteImage"] as const;
+
+function imageChars(row: StoredAvatarRow): number {
+  return IMAGE_FIELDS.reduce((sum, field) => sum + (row[field]?.length ?? 0), 0);
+}
+
+function writeAvatarSnapshot(rows: readonly StoredAvatarRow[]): void {
+  let budget = IMAGE_BUDGET_CHARS;
+  const kept = [...rows]
+    .sort((left, right) => imageChars(left) - imageChars(right))
+    .map((row) => {
+      const size = imageChars(row);
+      if (size <= budget) {
+        budget -= size;
+        return row;
+      }
+      return { ...row, customImage: null, faviconImage: null, remoteImage: null };
+    });
+  writeSnapshot(SNAPSHOT_KEY, kept);
+}
+
+function readAvatarSnapshot(): Map<string, StoredAvatarRow> | null {
+  return readSnapshot(SNAPSHOT_KEY, (value) => {
+    if (!Array.isArray(value)) return null;
+    const rows = new Map<string, StoredAvatarRow>();
+    for (const row of value) {
+      if (!isRecord(row) || typeof row.projectId !== "string") return null;
+      rows.set(row.projectId, row as unknown as StoredAvatarRow);
+    }
+    return rows;
+  });
 }

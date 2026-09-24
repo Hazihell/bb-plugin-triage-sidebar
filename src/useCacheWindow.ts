@@ -6,6 +6,7 @@ import {
   DEFAULT_CACHE_WINDOW,
   type CacheWindow,
 } from "./cache-window";
+import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
 
 /**
  * The two cache thresholds, read from the backend once.
@@ -20,7 +21,11 @@ import {
  */
 export function useCacheWindow(): CacheWindow {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
-  const [window, setWindow] = useState<CacheWindow>(DEFAULT_CACHE_WINDOW);
+  // Last session's thresholds first, so an age that was amber when the
+  // sidebar closed is amber on its first frame too.
+  const [window, setWindow] = useState<CacheWindow>(
+    () => readSnapshot(SNAPSHOT_KEY, parseWindow) ?? DEFAULT_CACHE_WINDOW,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -28,12 +33,12 @@ export function useCacheWindow(): CacheWindow {
       try {
         const values = await rpc.call("getSettings", {});
         if (cancelled) return;
-        setWindow(
-          cacheWindowFromMinutes(
-            values.cacheWarnAfterMinutes,
-            values.cacheColdAfterMinutes,
-          ),
+        const next = cacheWindowFromMinutes(
+          values.cacheWarnAfterMinutes,
+          values.cacheColdAfterMinutes,
         );
+        setWindow(next);
+        writeSnapshot(SNAPSHOT_KEY, next);
       } catch {
         // Keep the defaults.
       }
@@ -44,4 +49,15 @@ export function useCacheWindow(): CacheWindow {
   }, [rpc]);
 
   return window;
+}
+
+const SNAPSHOT_KEY = "cache-window:v1";
+
+function parseWindow(value: unknown): CacheWindow | null {
+  if (!isRecord(value)) return null;
+  const { warnAfterMs, coldAfterMs } = value;
+  if (typeof warnAfterMs !== "number" || typeof coldAfterMs !== "number") {
+    return null;
+  }
+  return { warnAfterMs, coldAfterMs };
 }
