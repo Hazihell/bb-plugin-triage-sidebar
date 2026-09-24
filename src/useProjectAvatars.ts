@@ -5,7 +5,8 @@ import type {
   StoredAvatarRow,
   triageSidebarRpcContract,
 } from "./server";
-import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
+import { createSnapshotStore } from "./local-snapshot";
+import { AVATAR_SNAPSHOT } from "./snapshot-schemas";
 
 export interface ProjectAvatarsApi {
   /**
@@ -116,15 +117,18 @@ export function useProjectAvatars(): ProjectAvatarsApi {
   );
 }
 
-const SNAPSHOT_KEY = "avatars:v1";
+const avatarSnapshot = createSnapshotStore<StoredAvatarRow>(
+  "avatars",
+  AVATAR_SNAPSHOT,
+);
 
 /**
- * The most image data the snapshot may hold. localStorage is one small quota
- * shared with bb itself, and an avatar image may be up to 256 KB, so the
- * snapshot keeps the smallest images first and drops the rest: those
- * projects paint a monogram for a moment on launch, as before.
+ * The most image data the snapshot may hold, in characters. localStorage is
+ * one small quota shared with bb itself, and an avatar image may be up to
+ * 256 KB, so the snapshot keeps the smallest images first and drops the rest:
+ * those projects paint a monogram for a moment on launch, as before.
  */
-const IMAGE_BUDGET_CHARS = 512 * 1024;
+const IMAGE_BUDGET_CHARS = 256 * 1024;
 const IMAGE_FIELDS = ["customImage", "faviconImage", "remoteImage"] as const;
 
 function imageChars(row: StoredAvatarRow): number {
@@ -132,28 +136,27 @@ function imageChars(row: StoredAvatarRow): number {
 }
 
 function writeAvatarSnapshot(rows: readonly StoredAvatarRow[]): void {
-  let budget = IMAGE_BUDGET_CHARS;
-  const kept = [...rows]
-    .sort((left, right) => imageChars(left) - imageChars(right))
-    .map((row) => {
-      const size = imageChars(row);
-      if (size <= budget) {
-        budget -= size;
-        return row;
-      }
-      return { ...row, customImage: null, faviconImage: null, remoteImage: null };
-    });
-  writeSnapshot(SNAPSHOT_KEY, kept);
+  avatarSnapshot.schedule(() => {
+    let budget = IMAGE_BUDGET_CHARS;
+    return [...rows]
+      .sort((left, right) => imageChars(left) - imageChars(right))
+      .map((row) => {
+        const size = imageChars(row);
+        if (size <= budget) {
+          budget -= size;
+          return row;
+        }
+        return {
+          ...row,
+          customImage: null,
+          faviconImage: null,
+          remoteImage: null,
+        };
+      });
+  });
 }
 
 function readAvatarSnapshot(): Map<string, StoredAvatarRow> | null {
-  return readSnapshot(SNAPSHOT_KEY, (value) => {
-    if (!Array.isArray(value)) return null;
-    const rows = new Map<string, StoredAvatarRow>();
-    for (const row of value) {
-      if (!isRecord(row) || typeof row.projectId !== "string") return null;
-      rows.set(row.projectId, row as unknown as StoredAvatarRow);
-    }
-    return rows;
-  });
+  const rows = avatarSnapshot.read();
+  return rows === null ? null : new Map(rows.map((row) => [row.projectId, row]));
 }

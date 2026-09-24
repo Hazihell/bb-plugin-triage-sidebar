@@ -12,6 +12,10 @@ import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import { resolveSnoozePresets } from "./lifecycle";
 import type { ProviderRecord } from "./ProviderGlyph";
 import { sidebarThread, sidebarProject } from "./test-fixtures";
+import { snapshotKey } from "./local-snapshot";
+import { AVATAR_SNAPSHOT, LIFECYCLE_SNAPSHOT } from "./snapshot-schemas";
+
+const LIFECYCLE_KEY = snapshotKey("lifecycle", LIFECYCLE_SNAPSHOT);
 
 // Load through the harness so the plugin's `@get-bb/plugin-sdk/app` import binds
 // to the test runtime; importing the component directly would bind it to an
@@ -1066,17 +1070,13 @@ describe("card metadata", () => {
   // now must not count from it on the first frame.
   it("ignores a turn start saved in last session's snapshot", () => {
     localStorage.setItem(
-      "bb-plugin:triage-sidebar:lifecycle:v1",
-      JSON.stringify({
-        epoch: "old",
-        seq: 0,
-        rows: [
+      LIFECYCLE_KEY,
+      JSON.stringify([
           {
             ...endedRow("thr_run", Date.now() - 4 * 3_600_000),
             startedWorkingAt: Date.now() - 3 * 3_600_000 - 60_000,
           },
-        ],
-      }),
+      ]),
     );
     renderSlot(inbox, listProps, {
       sidebarThreads: {
@@ -1716,12 +1716,8 @@ describe("first paint", () => {
 
   it("paints last session's shelves on the first frame", () => {
     localStorage.setItem(
-      "bb-plugin:triage-sidebar:lifecycle:v1",
-      JSON.stringify({
-        epoch: "old",
-        seq: 4,
-        rows: [{ ...endedRow("thr_done", 50), settledAt: 150 }],
-      }),
+      LIFECYCLE_KEY,
+      JSON.stringify([{ ...endedRow("thr_done", 50), settledAt: 150 }]),
     );
     renderFirstFrame();
     expect(screen.queryByRole("status", { name: "Loading threads" })).toBeNull();
@@ -1731,21 +1727,19 @@ describe("first paint", () => {
 
   it("paints last session's avatars on the first frame", () => {
     localStorage.setItem(
-      "bb-plugin:triage-sidebar:lifecycle:v1",
-      JSON.stringify({ epoch: "old", seq: 0, rows: [] }),
+      LIFECYCLE_KEY,
+      JSON.stringify([]),
     );
     localStorage.setItem(
-      "bb-plugin:triage-sidebar:avatars:v1",
+      snapshotKey("avatars", AVATAR_SNAPSHOT),
       JSON.stringify([
         {
+          ...Object.fromEntries(
+            Object.keys(AVATAR_SNAPSHOT).map((field) => [field, null]),
+          ),
           projectId: "proj_1",
           customKind: "emoji",
-          customColor: null,
-          customInitials: null,
           customEmoji: "🐙",
-          customImage: null,
-          faviconImage: null,
-          remoteImage: null,
         },
       ]),
     );
@@ -1764,12 +1758,29 @@ describe("first paint", () => {
   it("keeps a snapshot of what the server said for the next launch", async () => {
     render(threads, undefined, { thr_open: 42 });
     await listReady();
-    await waitFor(() => {
-      const saved = JSON.parse(
-        localStorage.getItem("bb-plugin:triage-sidebar:lifecycle:v1") ?? "null",
-      );
-      expect(saved?.rows).toEqual([endedRow("thr_open", 42)]);
-    });
+    // Written a second after the last change, and only the listed thread
+    // that has a row.
+    await waitFor(
+      () => {
+        const saved = JSON.parse(localStorage.getItem(LIFECYCLE_KEY) ?? "null");
+        expect(saved).toEqual([endedRow("thr_open", 42)]);
+      },
+      { timeout: 2_500 },
+    );
+  });
+
+  // A snapshot from an older build, or one damaged in storage, is not
+  // trusted by halves: one bad field and the skeleton shows instead.
+  it("discards a snapshot with a row of the wrong shape", () => {
+    localStorage.setItem(
+      LIFECYCLE_KEY,
+      JSON.stringify([
+        { ...endedRow("thr_open", 42) },
+        { ...endedRow("thr_done", 50), settledAt: "yesterday" },
+      ]),
+    );
+    renderFirstFrame();
+    expect(screen.getByRole("status", { name: "Loading threads" })).toBeDefined();
   });
 });
 

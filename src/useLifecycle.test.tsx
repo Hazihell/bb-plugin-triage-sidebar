@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { sidebarThread, sidebarProject } from "./test-fixtures";
+import { snapshotKey } from "./local-snapshot";
+import { LIFECYCLE_SNAPSHOT } from "./snapshot-schemas";
+
+const LIFECYCLE_KEY = snapshotKey("lifecycle", LIFECYCLE_SNAPSHOT);
 import type { ThreadLifecycleRow } from "./lifecycle";
 
 const toasts = vi.hoisted(() => {
@@ -161,8 +165,8 @@ describe("lifecycle sync", () => {
   // it stays, and one line says the shelves may be stale.
   it("keeps a snapshot on screen when the read fails, and says so", async () => {
     localStorage.setItem(
-      "bb-plugin:triage-sidebar:lifecycle:v1",
-      JSON.stringify({ epoch: "old", seq: 0, rows: [] }),
+      LIFECYCLE_KEY,
+      JSON.stringify([]),
     );
     renderInbox({
       listLifecycle: () => {

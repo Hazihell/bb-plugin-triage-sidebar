@@ -114,13 +114,17 @@ confirmation.
 ## First paint
 
 The sidebar's first frame is the list you last saw, not a list that re-sorts
-a second later. The parking store, the project avatars and the cache
-thresholds are kept in this browser's localStorage, written whenever they
-change, and read before the first render; the server's answer replaces them a
-moment later and only what really changed moves, without sliding. On a first
-launch there is no snapshot, and the list shows a still placeholder until the
-store answers — never the threads unshelved. Avatar images in the snapshot are
-capped at 512 KB, smallest first.
+a second later. The parking rows of threads still in the list (up to 500), the
+project avatars and the cache thresholds are kept in this browser's
+localStorage, saved a second after they change and when the page is hidden,
+and read before the first render; the server's answer replaces them a moment
+later and only what really changed moves, without sliding. Every saved field
+is checked before it is used, and a snapshot with one bad row, or from a
+build with a different row shape, is ignored. On a first launch there is no
+snapshot, and the list shows a still placeholder until the store answers —
+never the threads unshelved. Avatar images in the snapshot are capped at
+about 512 KB, smallest first; if storage is full, the snapshot is dropped
+rather than left stale.
 
 If the store cannot be read at all, the list says why and offers Retry. If a
 later refresh fails, the list stays and one line says the shelves may be out

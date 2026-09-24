@@ -7,7 +7,8 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import type { triageSidebarRpcContract } from "./server";
-import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
+import { createSnapshotStore } from "./local-snapshot";
+import { LIFECYCLE_SNAPSHOT } from "./snapshot-schemas";
 import {
   applyRowMessage,
   describeReap,
@@ -191,6 +192,10 @@ export function useLifecycle(
 ): LifecycleApi {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
   const [seed] = useState(readLifecycleSnapshot);
+  // What the next snapshot write may keep: rows of threads the host lists and
+  // has not archived. Read when the write happens, so it is always current.
+  const listedThreads = useRef(threads);
+  listedThreads.current = threads;
   const [sync, setSync] = useState<SyncState | null>(seed);
   const [status, setStatus] = useState<LifecycleLoadStatus>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +211,9 @@ export function useLifecycle(
   const commit = useCallback((next: SyncState) => {
     syncRef.current = next;
     setSync(next);
-    writeLifecycleSnapshot(next);
+    lifecycleSnapshot.schedule(() =>
+      rowsWorthSaving(syncRef.current, listedThreads.current),
+    );
   }, []);
 
   // Non-null while a full read is in flight: messages that arrive meanwhile
@@ -429,47 +436,56 @@ export function useLifecycle(
 
 const EMPTY_ROWS: ReadonlyMap<string, ThreadLifecycleRow> = new Map();
 
-const SNAPSHOT_KEY = "lifecycle:v1";
+const lifecycleSnapshot = createSnapshotStore<ThreadLifecycleRow>(
+  "lifecycle",
+  LIFECYCLE_SNAPSHOT,
+);
 
 /**
- * Written after every applied change, so the snapshot is always the last list
- * this client showed. Coalesced to one write per task: a full read and the
- * messages buffered behind it land together.
+ * Enough rows to paint a long sidebar. The store also holds rows for every
+ * thread ever archived, which the first frame never draws.
  */
-let pendingSnapshot: SyncState | null = null;
-function writeLifecycleSnapshot(state: SyncState): void {
-  const scheduled = pendingSnapshot !== null;
-  pendingSnapshot = state;
-  if (scheduled) return;
-  setTimeout(() => {
-    const latest = pendingSnapshot;
-    pendingSnapshot = null;
-    if (latest === null) return;
-    writeSnapshot(SNAPSHOT_KEY, {
-      epoch: latest.epoch,
-      seq: latest.seq,
-      rows: [...latest.rows.values()],
-    });
-  }, 0);
+const MAX_SNAPSHOT_ROWS = 500;
+
+/**
+ * The rows the next launch's first frame can use: those of threads the host
+ * lists and has not archived, the most recently active first, up to the cap.
+ * Null — skip the write — until both the store and the host's threads have
+ * arrived, so a half-loaded moment never overwrites a good snapshot.
+ */
+function rowsWorthSaving(
+  state: SyncState | null,
+  threads: readonly PluginSidebarThread[],
+): ThreadLifecycleRow[] | null {
+  if (state === null || threads.length === 0) return null;
+  const listed = threads
+    .filter((thread) => !thread.isArchived)
+    .sort((left, right) => right.latestAttentionAt - left.latestAttentionAt);
+  const rows: ThreadLifecycleRow[] = [];
+  for (const thread of listed) {
+    const row = state.rows.get(thread.id);
+    if (row === undefined) continue;
+    rows.push(row);
+    if (rows.length === MAX_SNAPSHOT_ROWS) break;
+  }
+  return rows;
 }
 
+/**
+ * Last session's rows, as a state the list can paint. A turn start saved then
+ * belongs to a turn that has ended or been superseded, so it is dropped; the
+ * client's own sighting stands in until the server answers. The counter is
+ * the server's to hand out, so a snapshot carries none: any message that
+ * arrives before the first read is buffered behind it anyway.
+ */
 function readLifecycleSnapshot(): SyncState | null {
-  return readSnapshot(SNAPSHOT_KEY, (value) => {
-    if (!isRecord(value) || !Array.isArray(value.rows)) return null;
-    if (typeof value.epoch !== "string" || typeof value.seq !== "number") {
-      return null;
-    }
-    const rows = new Map<string, ThreadLifecycleRow>();
-    for (const row of value.rows) {
-      if (!isRecord(row) || typeof row.threadId !== "string") return null;
-      // A turn start from last session belongs to a turn that has ended or
-      // been superseded; the client's own sighting stands in until the
-      // server answers.
-      rows.set(row.threadId, {
-        ...(row as unknown as ThreadLifecycleRow),
-        startedWorkingAt: null,
-      });
-    }
-    return { epoch: value.epoch, seq: value.seq, rows };
-  });
+  const rows = lifecycleSnapshot.read();
+  if (rows === null) return null;
+  return {
+    epoch: "",
+    seq: 0,
+    rows: new Map(
+      rows.map((row) => [row.threadId, { ...row, startedWorkingAt: null }]),
+    ),
+  };
 }
