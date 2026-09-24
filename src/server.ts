@@ -17,6 +17,13 @@ import {
 } from "./project-avatar-store";
 import { hostContract } from "./host-contract";
 import {
+  buildThreadIndex,
+  isThreadWorking,
+  isTurnLive,
+  type IndexedThread,
+  type ThreadIndex,
+} from "./thread-index";
+import {
   LIFECYCLE_CHANNEL,
   type LifecycleReapedMessage,
   type LifecycleRowMessage,
@@ -268,7 +275,7 @@ const REAP_HOST_TIMEOUT_MS = 60_000;
 
 /** How long after load the turn-timing backfill starts. */
 export const BACKFILL_DELAY_MS = 2_000;
-const BACKFILL_PAGE_SIZE = 200;
+const THREAD_PAGE_SIZE = 200;
 const BACKFILL_CONCURRENCY = 6;
 
 /**
@@ -386,23 +393,6 @@ export function parseCacheWindow(
   return { warnAfterMinutes: warn, coldAfterMinutes: cold };
 }
 
-/** The subset of bb's thread DTO the sweep reads. */
-interface SweepThreadView {
-  status?: string;
-  activeBackgroundAgentCount?: number;
-  runtime?: { displayStatus?: string };
-  /**
-   * bb's own "when did this last want you" stamp — the same number the
-   * sidebar's projection carries, so the sweep and the sidebar can be handed
-   * to one shared rule instead of each having its own idea of un-settling.
-   */
-  latestAttentionAt?: number;
-  lastReadAt?: number | null;
-  /** Named only so a manual run can report what it archived, by name. */
-  title?: string | null;
-  titleFallback?: string | null;
-}
-
 /** One thread a sweep archived, named so the caller can list it. */
 export interface ArchivedThread {
   threadId: string;
@@ -480,7 +470,10 @@ export function mergeReapSummaries(
  * Read before the archive call, because the DTO is what the sweep already has
  * and re-reading an archived thread to name it would be a second round trip.
  */
-export function sweepThreadTitle(thread: SweepThreadView): string {
+export function sweepThreadTitle(thread: {
+  title: string | null;
+  titleFallback: string | null;
+}): string {
   const title = thread.title?.trim();
   if (title) return title;
   const fallback = thread.titleFallback?.trim();
@@ -490,17 +483,14 @@ export function sweepThreadTitle(thread: SweepThreadView): string {
 /**
  * A thread and its descendants, deepest first.
  *
- * bb's archive takes a thread's direct children with it, but only one level
- * down: archiving a child *releases* that child's own children instead —
- * their parent link is cleared and they reappear in the sidebar as roots,
- * carrying a "released from parent" note. Walking the subtree and archiving
- * from the leaves up means every thread's children are already archived by
- * the time its own turn comes, so nothing is ever released.
+ * The reap closes terminals in this order, so a parent's are never closed
+ * while its children's are still running, and the sweep reads the same tree
+ * to decide whether anything in it is still working.
  *
  * `listChildIds` is passed in rather than read from bb here so the order can
  * be tested without a server. `maxDepth` and the visited set are guards, not
- * policy: a cycle or a runaway tree should cost a bounded number of round
- * trips rather than hang the sweep.
+ * policy: a cycle or a runaway tree should cost a bounded walk rather than
+ * hang the caller.
  */
 export async function collectSubtreeDeepestFirst(
   rootThreadId: string,
@@ -522,26 +512,6 @@ export async function collectSubtreeDeepestFirst(
   };
 
   return walk(rootThreadId, 0);
-}
-
-/**
- * Whether bb's own thread record shows work in flight.
- *
- * The mirror of `canPark`'s isWorking arm in src/lifecycle.ts, read from the
- * server's DTO instead of the sidebar's. Deliberately generous: every status
- * that is not plainly finished counts as working, because archiving a thread
- * that is still running is the one failure this sweep cannot afford.
- */
-export function isThreadWorking(thread: SweepThreadView): boolean {
-  if ((thread.activeBackgroundAgentCount ?? 0) > 0) return true;
-  const statuses = [thread.status, thread.runtime?.displayStatus];
-  return statuses.some(
-    (status) =>
-      status === "active" ||
-      status === "starting" ||
-      status === "stopping" ||
-      status === "provisioning",
-  );
 }
 
 export default function plugin(bb: BbPluginApi) {
@@ -799,17 +769,7 @@ export default function plugin(bb: BbPluginApi) {
    * the log can say so. Archived threads are skipped — they have no card.
    */
   const backfillTiming = async (): Promise<void> => {
-    const threads: Array<{ id: string; status: string }> = [];
-    for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
-      const page = await bb.sdk.threads.list({
-        archived: false,
-        includeHidden: true,
-        limit: BACKFILL_PAGE_SIZE,
-        offset,
-      });
-      threads.push(...page);
-      if (page.length < BACKFILL_PAGE_SIZE) break;
-    }
+    const threads = await listLiveThreads();
     await forEachLimited(threads, BACKFILL_CONCURRENCY, (thread) =>
       refreshTiming(
         thread.id,
@@ -1002,68 +962,30 @@ export default function plugin(bb: BbPluginApi) {
   };
 
   /**
-   * Whether the agent is waiting on an answer from the user.
-   *
-   * bb's thread DTO does not carry this — only the sidebar's projection does —
-   * so the sweep asks for the interactions directly. An unanswerable check
-   * counts as blocked: when in doubt this sweep leaves the thread alone.
-   */
-  const isBlockedOnUser = async (threadId: string): Promise<boolean> => {
-    try {
-      const interactions = await bb.sdk.threads.interactions.list({ threadId });
-      return interactions.some(
-        (interaction) => interaction.status === "pending",
-      );
-    } catch (error) {
-      bb.log.warn(
-        `auto-archive: could not read pending interactions for ${threadId}, leaving it alone (${String(error)})`,
-      );
-      return true;
-    }
-  };
-
-  /**
-   * The unarchived children bb still knows about for one thread.
+   * Every unarchived thread bb has, hidden ones included, in pages.
    *
    * Hidden threads are included on purpose: a hidden child is still a live
    * row that archiving its parent would release, and a released hidden thread
    * is the one the user has no way to find again.
    */
-  const listChildIds = async (parentThreadId: string): Promise<string[]> => {
-    const children = await bb.sdk.threads.list({
-      parentThreadId,
-      archived: false,
-      includeHidden: true,
-    });
-    return children.map((child) => child.id);
-  };
-
-  /**
-   * Whether any of this thread's own children is working.
-   *
-   * The sidebar folds child work into the parent's card, and the sweep has to
-   * agree with it or it would archive a thread the sidebar is showing as busy.
-   * Direct children only, like the sidebar: a grandchild's work already keeps
-   * its own parent alive, and that parent is a child of this one.
-   *
-   * An unreadable list counts as working — when in doubt this sweep leaves the
-   * thread alone.
-   */
-  const isAnyChildWorking = async (parentThreadId: string): Promise<boolean> => {
-    try {
-      const children = await bb.sdk.threads.list({
-        parentThreadId,
+  const listLiveThreads = async (): Promise<IndexedThread[]> => {
+    const threads: IndexedThread[] = [];
+    for (let offset = 0; ; offset += THREAD_PAGE_SIZE) {
+      const page = await bb.sdk.threads.list({
         archived: false,
         includeHidden: true,
+        limit: THREAD_PAGE_SIZE,
+        offset,
       });
-      return children.some(isThreadWorking);
-    } catch (error) {
-      bb.log.warn(
-        `auto-archive: could not read the children of ${parentThreadId}, leaving it alone (${String(error)})`,
-      );
-      return true;
+      threads.push(...page);
+      if (page.length < THREAD_PAGE_SIZE) return threads;
     }
   };
+
+  const childIdsFrom =
+    (index: ThreadIndex) =>
+    async (parentThreadId: string): Promise<string[]> =>
+      index.childrenOf(parentThreadId).map((child) => child.id);
 
   const hostClient = bb.hosts.experimental_client({ contract: hostContract });
 
@@ -1091,7 +1013,7 @@ export default function plugin(bb: BbPluginApi) {
         includeHidden: true,
       });
       return threads.some(
-        (thread) => !subtree.has(thread.id) && isThreadWorking(thread),
+        (thread) => !subtree.has(thread.id) && isTurnLive(thread),
       );
     } catch (error) {
       bb.log.warn(
@@ -1125,23 +1047,31 @@ export default function plugin(bb: BbPluginApi) {
    */
   const reapThreadSubtree = async (
     rootThreadId: string,
+    knownIndex?: ThreadIndex,
   ): Promise<ReapSummary> => {
     const values = await settings.get();
     if (values.reapOnSettle !== true) return emptyReapSummary(false);
 
-    let subtree: string[];
+    // The sweep already holds a fresh index; a settle reads its own.
+    let index: ThreadIndex;
     try {
-      subtree = await collectSubtreeDeepestFirst(rootThreadId, listChildIds);
+      index = knownIndex ?? buildThreadIndex(await listLiveThreads());
     } catch (error) {
       // Unlike the archive, which leaves an unreadable subtree entirely alone,
       // a reap falls back to the one thread it was asked about. Archiving half
       // a subtree releases the rest as orphan roots; reaping half of one just
       // leaves the other half running, which is the state it was already in.
+      // With no list there is also no environment to read, so only the
+      // thread's terminals are closed.
       bb.log.warn(
-        `reap: could not read the children of ${rootThreadId}, reaping it alone (${String(error)})`,
+        `reap: could not list threads, reaping ${rootThreadId}'s terminals alone (${String(error)})`,
       );
-      subtree = [rootThreadId];
+      index = buildThreadIndex([]);
     }
+    const subtree = await collectSubtreeDeepestFirst(
+      rootThreadId,
+      childIdsFrom(index),
+    );
 
     const summary = emptyReapSummary(true);
     // Settle returns before the reap runs, so the user can take it back while
@@ -1154,24 +1084,19 @@ export default function plugin(bb: BbPluginApi) {
 
     for (const threadId of subtree) {
       if (!stillSettled()) return summary;
-      try {
-        const thread = await bb.sdk.threads.get({ threadId });
-        const environmentId = thread.environmentId ?? null;
-        if (environmentId !== null && !targets.has(environmentId)) {
-          const environment = await bb.sdk.environments.get({ environmentId });
-          const path = environment.path?.trim() ?? "";
-          if (environment.isWorktree && path !== "") {
-            targets.set(environmentId, {
-              environmentId,
-              hostId: environment.hostId,
-              path,
-            });
-          }
-        }
-      } catch (error) {
-        bb.log.warn(
-          `reap: could not read the environment of ${threadId} (${String(error)})`,
-        );
+      const thread = index.get(threadId);
+      const path = thread?.environmentPath?.trim() ?? "";
+      if (
+        thread?.environmentId != null &&
+        thread.environmentHostId != null &&
+        thread.environmentIsWorktree === true &&
+        path !== ""
+      ) {
+        targets.set(thread.environmentId, {
+          environmentId: thread.environmentId,
+          hostId: thread.environmentHostId,
+          path,
+        });
       }
 
       try {
@@ -1263,9 +1188,10 @@ export default function plugin(bb: BbPluginApi) {
   const reapQuietly = async (
     threadId: string,
     context: string,
+    index?: ThreadIndex,
   ): Promise<ReapSummary> => {
     try {
-      return await reapThreadSubtree(threadId);
+      return await reapThreadSubtree(threadId, index);
     } catch (error) {
       bb.log.warn(`${context}: reaping ${threadId} failed (${String(error)})`);
       return emptyReapSummary(true);
@@ -1337,6 +1263,14 @@ export default function plugin(bb: BbPluginApi) {
     // them.
     let descendants = 0;
 
+    // One read of every live thread answers every question below — work,
+    // children, a waiting question, the environment — where the sweep used
+    // to make several round trips per candidate. A list that cannot be read
+    // fails the whole sweep: guessing would archive threads still in use, and
+    // the next tick tries again.
+    const index =
+      candidates.length === 0 ? buildThreadIndex([]) : buildThreadIndex(await listLiveThreads());
+
     for (const threadId of candidates) {
       // Re-read rather than carry the id's row from the query above: the user
       // can settle, snooze or unsettle while this loop is awaiting bb.
@@ -1346,35 +1280,32 @@ export default function plugin(bb: BbPluginApi) {
         continue;
       }
 
-      let thread: SweepThreadView | null;
-      try {
-        thread = await bb.sdk.threads.get({ threadId });
-      } catch {
-        // Gone from bb, so the row describes nothing. Dropping it also stops
-        // this sweep from retrying the same dead id on every pass.
-        clear(threadId);
-        forgotten += 1;
-        continue;
-      }
-      if (thread === null || thread === undefined) {
+      const thread = index.get(threadId);
+      if (thread === undefined) {
+        // Gone from bb, or already archived, so the row describes nothing.
+        // Dropping it also stops this sweep from retrying the same dead id
+        // on every pass.
         clear(threadId);
         forgotten += 1;
         continue;
       }
 
-      // Work on a child counts as work on the parent, exactly as the sidebar
-      // reads it: a thread whose subagents are running looks idle in its own
-      // DTO, and archiving it would take the running children with it.
-      const isWorking =
-        isThreadWorking(thread) || (await isAnyChildWorking(threadId));
-      const latestAttentionAt = thread.latestAttentionAt ?? 0;
+      // Leaves first, so the reap below walks the same tree the archive
+      // takes. Read from the index, so it cannot fail.
+      const subtree = await collectSubtreeDeepestFirst(threadId, childIdsFrom(index));
+
+      // Work anywhere below counts as work on this thread. The sidebar folds
+      // a child's work into its parent, and a grandchild's into its own
+      // parent, so the whole tree is what it shows as busy; and archiving
+      // takes the whole tree, running children included.
+      const isWorking = subtree.some((id) => {
+        const member = index.get(id);
+        return member !== undefined && isThreadWorking(member);
+      });
+      const latestAttentionAt = thread.latestAttentionAt;
       const signals: ThreadActivitySignals = {
         isWorking,
-        // Not asked while the thread is plainly working: working already
-        // blocks parking on its own, and this is a round trip per candidate.
-        hasPendingInteraction: isWorking
-          ? false
-          : await isBlockedOnUser(threadId),
+        hasPendingInteraction: thread.hasPendingInteraction,
         isUnread:
           thread.lastReadAt == null || thread.lastReadAt < latestAttentionAt,
         latestAttentionAt,
@@ -1395,51 +1326,32 @@ export default function plugin(bb: BbPluginApi) {
         continue;
       }
 
-      // Leaves first, so no descendant is ever left behind as a released
-      // root. A subtree that cannot be read is left entirely alone: archiving
-      // the top of it is exactly the half-measure this loop is fixing.
-      let subtree: string[];
-      try {
-        subtree = await collectSubtreeDeepestFirst(threadId, listChildIds);
-      } catch (error) {
-        bb.log.warn(
-          `auto-archive: could not read the children of ${threadId}, leaving it alone (${String(error)})`,
-        );
-        failed += 1;
-        continue;
-      }
-
-      // Before the archive, not after: once a thread is archived bb no longer
-      // lists it as a child, and the walk this reap needs would come back
-      // short.
+      // Before the archive, not after: an archived thread's worktree may be
+      // retired by bb, and its terminals are no longer the thread's to close.
       reaped = mergeReapSummaries(
         reaped,
-        await reapQuietly(threadId, "auto-archive"),
+        await reapQuietly(threadId, "auto-archive", index),
       );
 
-      let archiveFailed = false;
-      for (const subtreeId of subtree) {
-        try {
-          await bb.sdk.threads.archive({ threadId: subtreeId });
-        } catch (error) {
-          // Keep the row: the thread is still on the shelf, and the next
-          // sweep gets another chance at whatever is left.
-          bb.log.warn(
-            `auto-archive: archiving ${subtreeId} failed (${String(error)})`,
-          );
-          archiveFailed = true;
-          break;
-        }
-        // The lifecycle row exists to place a thread on a shelf. Archived, it
-        // has no shelf, and a leftover row would park it again if unarchived.
-        // Descendants can carry rows of their own, so they are cleared too.
-        clear(subtreeId);
-      }
-      if (archiveFailed) {
+      // One call for the whole tree. bb archives a thread with every
+      // descendant, deepest first, so nothing is released as an orphan root.
+      let archivedIds: string[];
+      try {
+        archivedIds = (await bb.sdk.threads.archive({ threadId })).archivedThreadIds;
+      } catch (error) {
+        // Keep the row: the thread is still on the shelf, and the next sweep
+        // gets another chance at it.
+        bb.log.warn(`auto-archive: archiving ${threadId} failed (${String(error)})`);
         failed += 1;
         continue;
       }
-      descendants += subtree.length - 1;
+      // The lifecycle row exists to place a thread on a shelf. Archived, it
+      // has no shelf, and a leftover row would park it again if unarchived.
+      // Descendants can carry rows of their own, so they are cleared too —
+      // bb's thread.archived event would, but the sweep's report should not
+      // depend on an event arriving first.
+      for (const archivedId of new Set([threadId, ...archivedIds])) clear(archivedId);
+      descendants += Math.max(0, archivedIds.length - 1);
       archived.push({ threadId, title: sweepThreadTitle(thread) });
     }
 
