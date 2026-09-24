@@ -269,10 +269,17 @@ says why.
 
 One rule matters more than the rest: **a thread that is working can never be
 parked.** bb has more kinds of live work than a running turn — workflows,
-background agents, background commands, plan mode, goals — and every one of
-them, on the thread or on any thread below it, blocks parking and wakes a
-parked thread. Hiding running work is the one failure this feature cannot
-afford. See `canPark` in `src/lifecycle.ts`.
+background agents, plan mode, goals — and every one of them, on the thread or
+on any thread below it, blocks parking and wakes a parked thread. Hiding
+running work is the one failure this feature cannot afford. See `canPark` in
+`src/lifecycle.ts`.
+
+Background commands are the exception. A dev server or watcher the agent left
+running after its turn is exactly what settling stops, so it never blocks
+Settle or Snooze and never pulls a parked thread back; the terminal glyph
+stays beside the time. The auto-archive sweep is stricter: it leaves a settled
+thread whose command still runs where it is, and archives it once the command
+is gone.
 
 ## What settling stops
 

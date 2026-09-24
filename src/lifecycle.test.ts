@@ -13,7 +13,7 @@ import {
 
 const quiet: ThreadActivitySignals = {
   hasPendingInteraction: false,
-  isWorking: false,
+  blocksParking: false,
   isUnread: false,
   latestAttentionAt: 0,
 };
@@ -38,7 +38,7 @@ describe("canPark", () => {
   // The trap this whole feature has to avoid: bb has more kinds of live work
   // than a session status, and parking any of them hides running work.
   it("refuses while any work is running", () => {
-    expect(canPark({ ...quiet, isWorking: true })).toBe(false);
+    expect(canPark({ ...quiet, blocksParking: true })).toBe(false);
   });
 
   it("allows a quiet thread", () => {
@@ -59,7 +59,7 @@ describe("resolveShelf", () => {
     expect(
       resolveShelf(
         row({ settledAt: 500 }),
-        { ...quiet, isWorking: true },
+        { ...quiet, blocksParking: true },
         1_000,
       ),
     ).toBe("active");
@@ -151,7 +151,7 @@ describe("resolveSettledSweepAction", () => {
     expect(
       resolveSettledSweepAction(
         row({ settledAt: 500 }),
-        { ...quiet, isWorking: true },
+        { ...quiet, blocksParking: true },
         1_000,
       ),
     ).toBe("skip");

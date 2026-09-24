@@ -17,7 +17,7 @@ vi.mock("sonner", () => toasts);
 
 const app = await loadPluginApp(() => import("../app"));
 // After the harness, so the module binds to the test runtime.
-const { busyThreadIds } = await import("./useLifecycle");
+const { blocksParking, busyThreadIds } = await import("./useLifecycle");
 const inbox = app.threadLists[0]!;
 
 const listProps = {
@@ -274,6 +274,18 @@ describe("busyThreadIds", () => {
       sidebarThread({ id: "other" }),
     ]);
     expect([...busy].sort()).toEqual(["leaf", "mid", "root"]);
+  });
+
+  // The shelves fold only the work parking must not hide: a background
+  // command marks nothing, on the thread or above it.
+  it("leaves background commands out when asked for parking blockers", () => {
+    const commands = { workflows: 0, backgroundAgents: 0, backgroundCommands: 1, planMode: 0, goals: 0 };
+    const threads = [
+      sidebarThread({ id: "root" }),
+      sidebarThread({ id: "leaf", parentThreadId: "root", activity: commands }),
+    ];
+    expect([...busyThreadIds(threads)].sort()).toEqual(["leaf", "root"]);
+    expect([...busyThreadIds(threads, blocksParking)]).toEqual([]);
   });
 
   it("survives a parent chain that loops", () => {

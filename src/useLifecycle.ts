@@ -59,21 +59,36 @@ export function isTurnRunning(thread: PluginSidebarThread): boolean {
 
 /**
  * Any live work on the thread itself: a turn, or anything running in the
- * background. This, not {@link isTurnRunning}, blocks parking, wakes a parked
- * thread and lifts the thread into the sort's working tier, because hiding a
- * thread whose dev server or workflow is still running is the failure parking
- * cannot afford. The server's sweep keeps its own, deliberately similar rule.
+ * background. This, not {@link isTurnRunning}, lifts the thread into the
+ * sort's working tier and draws the working pencil.
  *
  * Its own, and only its own. Everything that asks "is anything happening here,
  * children included" wants {@link busyThreadIds} instead.
  */
 export function isWorking(thread: PluginSidebarThread): boolean {
+  return blocksParking(thread) || thread.activity.backgroundCommands > 0;
+}
+
+/**
+ * The live work on the thread itself that parking must not hide: everything
+ * {@link isWorking} counts except background commands. This is what blocks
+ * parking and wakes a parked thread.
+ *
+ * A background command is left out because it is usually a dev server or a
+ * watcher the agent left running after its turn — exactly what settling's
+ * cleanup exists to stop. The card still shows its terminal glyph.
+ *
+ * Read from the thread's own activity counts, never from bb's indicator: bb
+ * rolls a child's work up into its parent's "runtime" indicator, and a child's
+ * background command must not block the parent that way. A child's other work
+ * reaches the parent through {@link busyThreadIds}.
+ */
+export function blocksParking(thread: PluginSidebarThread): boolean {
   const { activity } = thread;
   return (
     isTurnRunning(thread) ||
     activity.workflows > 0 ||
     activity.backgroundAgents > 0 ||
-    activity.backgroundCommands > 0 ||
     activity.planMode > 0 ||
     activity.goals > 0
   );
@@ -93,17 +108,19 @@ export function isWorking(thread: PluginSidebarThread): boolean {
  * malformed parent chain cannot loop.
  *
  * One pass over the list rather than a lookup per card: the sort asks this of
- * every row.
+ * every row. `isLive` says what counts as work: {@link isWorking} for the
+ * sort, {@link blocksParking} for the shelves.
  */
 export function busyThreadIds(
   threads: readonly PluginSidebarThread[],
+  isLive: (thread: PluginSidebarThread) => boolean = isWorking,
 ): ReadonlySet<string> {
   const parentOf = new Map(
     threads.map((thread) => [thread.id, thread.parentThreadId]),
   );
   const busy = new Set<string>();
   for (const thread of threads) {
-    if (!isWorking(thread)) continue;
+    if (!isLive(thread)) continue;
     let id: string | null | undefined = thread.id;
     while (id != null && !busy.has(id)) {
       busy.add(id);
@@ -340,12 +357,13 @@ export function useLifecycle(
 
   return useMemo<LifecycleApi>(() => {
     const busy = busyThreadIds(threads);
+    const parkingBlocked = busyThreadIds(threads, blocksParking);
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
     const signalsFor = (thread: PluginSidebarThread) => ({
       hasPendingInteraction: thread.hasPendingInteraction,
-      // Busy, not the thread's own work: a parent whose children are running
-      // may not be parked, and the shelves must agree with the card.
-      isWorking: busy.has(thread.id),
+      // Folded, not the thread's own work: a parent whose children are
+      // running may not be parked, and the shelves must agree with the card.
+      blocksParking: parkingBlocked.has(thread.id),
       isUnread: thread.isUnread,
       latestAttentionAt: thread.latestAttentionAt,
     });

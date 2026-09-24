@@ -1263,7 +1263,10 @@ export default function plugin(bb: BbPluginApi) {
       return member !== undefined && isThreadWorking(member);
     });
     const signals: ThreadActivitySignals = {
-      isWorking,
+      // Wider than the sidebar's rule: a background command counts here, so
+      // the sweep skips (never un-settles) a settled thread whose command
+      // still runs, and archives it once the command is gone.
+      blocksParking: isWorking,
       hasPendingInteraction: thread.hasPendingInteraction,
       isUnread: thread.lastReadAt == null || thread.lastReadAt < thread.latestAttentionAt,
       latestAttentionAt: thread.latestAttentionAt,

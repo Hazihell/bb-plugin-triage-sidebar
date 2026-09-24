@@ -47,14 +47,15 @@ describe("isTurnLive", () => {
     expect(isTurnLive(thread({ id: "a" }))).toBe(false);
   });
 
-  // A sibling's plan mode or goal has no process to kill under; it does not
-  // make the worktree off-limits to the reap.
+  // A sibling's plan mode or goal has no process to kill under, and a
+  // background command is what the reap is there to stop; neither makes the
+  // worktree off-limits to it.
   it("does not count activity that runs no turn", () => {
     expect(
       isTurnLive(
         thread({
           id: "a",
-          activity: { ...thread({ id: "x" }).activity, activePlanModeCount: 1, activeGoalCount: 1 },
+          activity: { ...thread({ id: "x" }).activity, activePlanModeCount: 1, activeGoalCount: 1, activeBackgroundCommandCount: 1 },
         }),
       ),
     ).toBe(false);

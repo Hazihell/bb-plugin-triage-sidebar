@@ -116,9 +116,10 @@ export function isTurnLive(thread: IndexedThread): boolean {
  * mode, goals).
  *
  * The mirror of the sidebar's `isWorking`, read from the list row instead of
- * the sidebar's projection, so the sweep and the sidebar agree about which
- * threads may be parked. Deliberately generous: archiving a thread that is
- * still working is the one failure the sweep cannot afford.
+ * the sidebar's projection. Deliberately generous, and wider than the
+ * sidebar's parking rule, which lets a background command be settled: the
+ * sweep only skips such a thread until the command is gone, because archiving
+ * a thread that is still working is the one failure the sweep cannot afford.
  */
 export function isThreadWorking(thread: IndexedThread): boolean {
   const { activity } = thread;

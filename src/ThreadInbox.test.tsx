@@ -338,6 +338,95 @@ describe("parking threads", () => {
     expect(screen.queryByLabelText("Settle thread")).toBeNull();
   });
 
+  const activityOf = (counts: Partial<PluginSidebarThread["activity"]>) => ({
+    workflows: 0,
+    backgroundAgents: 0,
+    backgroundCommands: 0,
+    planMode: 0,
+    goals: 0,
+    ...counts,
+  });
+
+  function renderSettled(threads: PluginSidebarThread[]) {
+    return renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads,
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
+          rows: threads.map((t) => ({
+            threadId: t.id,
+            settledAt: t.latestAttentionAt + 1,
+            snoozedUntil: null,
+            snoozedAt: null,
+          })),
+        }),
+      },
+    });
+  }
+
+  // A dev server left running after the turn does not pull a settled thread
+  // back: settling is how the user stops it. Its glyph stays on the row.
+  it("keeps a thread whose background command runs on the Settled shelf", async () => {
+    renderSettled([
+      thread({
+        id: "thr_cmd",
+        title: "Dev server left up",
+        indicator: "background-command",
+        indicatorLabel: "Background command running",
+        activity: activityOf({ backgroundCommands: 1 }),
+      }),
+    ]);
+    const shelf = await screen.findByRole("region", { name: "Settled" });
+    expect(within(shelf).getByText(/Settled \(1\)/)).toBeDefined();
+    fireEvent.click(within(shelf).getByRole("button"));
+    expect(within(shelf).getByText("Dev server left up")).toBeDefined();
+    expect(
+      within(shelf).getByLabelText("Background command running"),
+    ).toBeDefined();
+  });
+
+  // A child's background command does not block its parent either, even if
+  // bb rolls it up into the parent's "runtime" indicator: parking reads the
+  // activity counts, never the indicator.
+  it("lets a parent settle while its child's background command runs", async () => {
+    render([
+      thread({
+        id: "thr_par",
+        title: "Parent",
+        indicator: "runtime",
+        indicatorLabel: "Thread working",
+      }),
+      thread({
+        id: "thr_kid",
+        title: "Child",
+        parentThreadId: "thr_par",
+        activity: activityOf({ backgroundCommands: 1 }),
+      }),
+    ]);
+    await listReady();
+    expect(screen.getByLabelText("Settle thread")).toBeDefined();
+  });
+
+  it("still keeps a thread with a background agent off the shelves", async () => {
+    renderSettled([
+      thread({
+        id: "thr_agent",
+        title: "Agent still out",
+        indicator: "background-agent",
+        indicatorLabel: "Background agent running",
+        activity: activityOf({ backgroundAgents: 1 }),
+      }),
+    ]);
+    expect(await screen.findByText("Agent still out")).toBeDefined();
+    expect(screen.queryByRole("region", { name: "Settled" })).toBeNull();
+    expect(screen.queryByLabelText("Settle thread")).toBeNull();
+  });
+
   it("offers settle and snooze on a parkable thread", async () => {
     render([thread({ id: "thr_park", title: "Quiet" })]);
     // Rendered (not merely accepted as props): a card whose park controls
@@ -1188,8 +1277,8 @@ describe("card metadata", () => {
       await screen.findByLabelText("Background command running"),
     ).toBeDefined();
     expect(screen.getByText("3h")).toBeDefined();
-    // Still live work, though: it may not be parked.
-    expect(screen.queryByLabelText("Settle thread")).toBeNull();
+    // A leftover command is what settling stops, so it may be parked.
+    expect(await screen.findByLabelText("Settle thread")).toBeDefined();
   });
 
   it("counts a running turn from bb's status, whatever the indicator", async () => {

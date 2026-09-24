@@ -31,11 +31,12 @@ export interface ThreadLifecycleRow {
 export interface ThreadActivitySignals {
   hasPendingInteraction: boolean;
   /**
-   * Any live work — runtime, workflows, background agents, plan, goals —
-   * counting the thread's own children as its own. A parent whose subagents
-   * are running is not idle, whatever its own record says.
+   * Live work that parking must not hide — a turn, workflows, background
+   * agents, plan, goals — counting the thread's own children as its own. A
+   * parent whose subagents are running is not idle, whatever its own record
+   * says. Background commands are not in it: see {@link canPark}.
    */
-  isWorking: boolean;
+  blocksParking: boolean;
   isUnread: boolean;
   /** Newest attention timestamp bb reports for the thread. */
   latestAttentionAt: number;
@@ -47,12 +48,16 @@ export type ThreadShelf = "active" | "snoozed" | "settled";
  * Whether a thread may be parked at all.
  *
  * bb has more kinds of live work than a single session status — workflows,
- * background agents, background commands, plan mode, goals — and every one of
- * them must block parking. Hiding a thread that is still working is the one
- * failure this feature cannot afford.
+ * background agents, plan mode, goals — and every one of them blocks parking.
+ * Hiding a thread that is still working is the one failure this feature
+ * cannot afford.
+ *
+ * Background commands are the exception. A dev server or watcher left running
+ * after the turn is exactly what settling's cleanup exists to stop, so it
+ * must not stop the user settling, nor pull a parked thread back.
  */
 export function canPark(signals: ThreadActivitySignals): boolean {
-  return !signals.hasPendingInteraction && !signals.isWorking;
+  return !signals.hasPendingInteraction && !signals.blocksParking;
 }
 
 /**
