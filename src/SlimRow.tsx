@@ -9,7 +9,7 @@ import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { ThreadRowLink } from "./ThreadRowLink";
-import { RowAside } from "./RowAside";
+import { ROW_ACTION_BUTTON_CLASS, RowAside } from "./RowAside";
 import { snoozeWakeLabel } from "./lifecycle";
 import type { CacheWindow } from "./cache-window";
 
@@ -62,7 +62,7 @@ export function SlimRow({
       <li className="list-none">
         <div
           className={cn(
-            "group/slim relative flex h-8 items-center gap-2 rounded-md px-2.5 text-xs",
+            "group/slim relative flex h-8 items-center gap-2 rounded-md px-2.5 text-xs [@media(hover:none)]:select-none",
             isActive ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60",
           )}
         >
@@ -110,7 +110,7 @@ export function SlimRow({
                 event.stopPropagation();
                 onRestore();
               }}
-              className="cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+              className={ROW_ACTION_BUTTON_CLASS}
             >
               <Icon
                 name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}

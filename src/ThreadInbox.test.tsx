@@ -1437,6 +1437,19 @@ describe("jump shortcuts", () => {
     expect(strip.className.split(" ")).not.toContain("hidden");
   });
 
+  // jsdom evaluates no media queries, so this pins the contract instead: with
+  // no hover, the actions are always drawn, and a long-press on the row is the
+  // row menu's rather than the browser's link callout.
+  it("draws the park actions on touch and keeps long-press for the row menu", async () => {
+    render([thread({ id: "thr_touch" })]);
+    await listReady();
+    const strip = screen.getByLabelText("Settle thread").parentElement!;
+    expect(strip.className).toContain("[@media(hover:none)]:flex");
+    expect(screen.getByRole("link").className).toContain(
+      "[-webkit-touch-callout:none]",
+    );
+  });
+
   it("shows no key when the modifier is up", async () => {
     render([thread({ id: "thr_k" })]);
     await listReady();

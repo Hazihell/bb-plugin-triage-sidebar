@@ -45,7 +45,13 @@ export function ThreadRowLink({
         }
         onNavigate();
       }}
-      className="absolute inset-0 cursor-pointer rounded-md"
+      // A long-press is the row menu's gesture on touch, not the browser's
+      // link preview or its copy-link sheet. Radix asks for the same on the
+      // row, but only as an inline style on the list item, which does not
+      // always reach a real link; the link says it itself. Text selection is
+      // off on touch for the same reason: a held finger would start selecting
+      // the title instead.
+      className="absolute inset-0 cursor-pointer rounded-md [-webkit-touch-callout:none] [@media(hover:none)]:select-none"
     />
   );
 }

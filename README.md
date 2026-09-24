@@ -87,7 +87,8 @@ Three shelves:
   Two things sit just left of the slot and never in it. While you hold the
   command key, bb's jump key for the row. On hover or keyboard focus, a card
   that can be parked shows **Snooze**, which opens a menu of presets, and
-  **Settle**.
+  **Settle**. On a phone or tablet, which has no hover, both are always
+  shown, with finger-sized targets that leave the card its height.
 
   The glyphs are bb's own, so the two lists speak one language: the red
   circle-x for a failure or a message that failed to send, the amber
@@ -108,9 +109,9 @@ Three shelves:
 - **Settled** — work you are done with, collapsed to one line each. See
   below for what settling stops.
 
-Right-click (or long-press) any row for the same park actions and bb's own:
-open in split, mark read, pin, archive, delete. Delete goes through bb's
-confirmation.
+Right-click (or long-press, on touch) any row for the same park actions and
+bb's own: open in split, mark read, pin, archive, delete. Delete goes through
+bb's confirmation.
 
 ## First paint
 

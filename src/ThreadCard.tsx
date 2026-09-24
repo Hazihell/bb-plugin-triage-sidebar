@@ -20,7 +20,7 @@ import { cn } from "./lib/utils";
 import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { ProviderGlyph, type ProviderRecord } from "./ProviderGlyph";
 import { ThreadRowLink } from "./ThreadRowLink";
-import { RowAside } from "./RowAside";
+import { ROW_ACTION_BUTTON_CLASS, RowAside } from "./RowAside";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { WAITING_COLOR } from "./StatusGlyph";
 import type { CacheWindow } from "./cache-window";
@@ -102,7 +102,7 @@ export function ThreadCard({
       <li className="list-none">
         <div
           className={cn(
-            "group/card relative rounded-md px-2.5 py-2 transition-colors",
+            "group/card relative rounded-md px-2.5 py-2 transition-colors [@media(hover:none)]:select-none",
             isActive ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60",
             // A thread open in another pane gets a weaker tint than the active
             // row, so the two states stay distinguishable.
@@ -261,7 +261,7 @@ function ParkActions({ park }: { park: ParkMenuActions }) {
             type="button"
             aria-label="Snooze"
             onClick={(event) => event.stopPropagation()}
-            className={cn(PARK_BUTTON_CLASS, snoozeOpen && "text-foreground")}
+            className={cn(ROW_ACTION_BUTTON_CLASS, snoozeOpen && "text-foreground")}
           >
             <Icon name="Clock" className="size-3.5" />
           </button>
@@ -286,7 +286,7 @@ function ParkActions({ park }: { park: ParkMenuActions }) {
           event.stopPropagation();
           park.onSettle();
         }}
-        className={PARK_BUTTON_CLASS}
+        className={ROW_ACTION_BUTTON_CLASS}
       >
         <Icon name="Check" className="size-3.5" />
       </button>
@@ -294,8 +294,6 @@ function ParkActions({ park }: { park: ParkMenuActions }) {
   );
 }
 
-const PARK_BUTTON_CLASS =
-  "cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring";
 
 function ActivityCount({
   label,

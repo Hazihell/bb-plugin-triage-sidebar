@@ -20,6 +20,21 @@ const REVEAL = {
   },
 } as const;
 
+/**
+ * On a device without hover (a phone, a tablet) there is no hover to reveal
+ * the actions, so they are always drawn, spaced for a finger.
+ */
+const ALWAYS_ON_TOUCH =
+  "[@media(hover:none)]:not-sr-only [@media(hover:none)]:flex [@media(hover:none)]:gap-2.5";
+
+/**
+ * One row action button. On touch its hit area reaches past the glyph —
+ * about 30 by 34 pixels — through an invisible pseudo-element, so the target
+ * grows without the line, and so the card, growing with it.
+ */
+export const ROW_ACTION_BUTTON_CLASS =
+  "relative cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring [@media(hover:none)]:after:absolute [@media(hover:none)]:after:-inset-x-1.5 [@media(hover:none)]:after:-inset-y-2 [@media(hover:none)]:after:content-['']";
+
 /** An action whose menu is open stays drawn, whatever else is going on. */
 const WHILE_MENU_OPEN =
   "has-[[data-state=open]]:not-sr-only has-[[data-state=open]]:flex";
@@ -30,7 +45,7 @@ const WHILE_MENU_OPEN =
  *
  * - While the app modifier is held, bb's jump key for the row.
  * - Otherwise `rest` (a parked row's wake countdown) at rest, and the row's
- *   actions on hover or keyboard focus.
+ *   actions on hover or keyboard focus — or always, on a touch device.
  *
  * The actions stay mounted throughout. Visually hidden at rest rather than
  * removed, so Tab and Shift+Tab reach them from either neighbour; hidden while
@@ -60,7 +75,7 @@ export function RowAside({
       <span
         className={cn(
           "pointer-events-auto items-center gap-0.5",
-          shortcut !== null ? "hidden" : REVEAL[row].actions,
+          shortcut !== null ? "hidden" : [REVEAL[row].actions, ALWAYS_ON_TOUCH],
           WHILE_MENU_OPEN,
         )}
       >
