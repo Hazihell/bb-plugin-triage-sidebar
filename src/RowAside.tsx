@@ -20,25 +20,9 @@ const REVEAL = {
   },
 } as const;
 
-/**
- * On a device without hover (a phone, a tablet) there is no hover to reveal
- * the actions, so they are always drawn, spaced for a finger.
- */
-const ALWAYS_ON_TOUCH =
-  "[@media(hover:none)]:not-sr-only [@media(hover:none)]:flex [@media(hover:none)]:gap-3";
-
-/**
- * One row action button. On touch its hit area reaches past the glyph —
- * 30 by 26 pixels — through an invisible pseudo-element, so the target grows
- * without the line, and so the card, growing with it.
- *
- * It grows up into the card's top padding and sideways into the gap, never
- * down: below the button is the title, and a tap near a long title's end must
- * open the thread, not settle it. Sideways it takes 6px, exactly half the
- * 12px gap, so neighbouring targets meet without overlapping.
- */
+/** One row action button, drawn only where there is hover to reveal it. */
 export const ROW_ACTION_BUTTON_CLASS =
-  "relative cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring [@media(hover:none)]:after:absolute [@media(hover:none)]:after:-inset-x-1.5 [@media(hover:none)]:after:-top-2 [@media(hover:none)]:after:bottom-0 [@media(hover:none)]:after:content-['']";
+  "relative cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring";
 
 /** An action whose menu is open stays drawn, whatever else is going on. */
 const WHILE_MENU_OPEN =
@@ -50,7 +34,12 @@ const WHILE_MENU_OPEN =
  *
  * - While the app modifier is held, bb's jump key for the row.
  * - Otherwise `rest` (a parked row's wake countdown) at rest, and the row's
- *   actions on hover or keyboard focus — or always, on a touch device.
+ *   actions on hover or keyboard focus.
+ *
+ * A touch device never draws the actions. It has no hover, and hover variants
+ * only apply where the pointer can hover, so the strip stays visually hidden
+ * and the row menu, on long-press, is where a finger parks a thread. A screen
+ * reader still reaches the buttons, since it cannot long-press.
  *
  * The actions stay mounted throughout. Visually hidden at rest rather than
  * removed, so Tab and Shift+Tab reach them from either neighbour; hidden while
@@ -80,7 +69,7 @@ export function RowAside({
       <span
         className={cn(
           "pointer-events-auto items-center gap-0.5",
-          shortcut !== null ? "hidden" : [REVEAL[row].actions, ALWAYS_ON_TOUCH],
+          shortcut !== null ? "hidden" : REVEAL[row].actions,
           WHILE_MENU_OPEN,
         )}
       >

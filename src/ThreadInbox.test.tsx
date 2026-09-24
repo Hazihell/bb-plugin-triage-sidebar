@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -752,9 +753,80 @@ describe("row context menu", () => {
     ]);
   });
 
-  // The mobile gap this menu closes: the card's settle and snooze are hover
-  // buttons, which a touch device has no way to reach. Radix opens this menu
-  // on long-press, so the items below are the only park route there.
+  describe("long-press on touch", () => {
+    afterEach(() => vi.useRealTimers());
+
+    const press = (row: HTMLElement, moves: Array<[number, number]>) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const at = (x: number, y: number) => ({
+        pointerType: "touch",
+        pointerId: 1,
+        isPrimary: true,
+        clientX: x,
+        clientY: y,
+      });
+      fireEvent.pointerDown(row, at(20, 20));
+      for (const [x, y] of moves) fireEvent.pointerMove(row, at(x, y));
+      act(() => vi.advanceTimersByTime(700));
+      vi.useRealTimers();
+    };
+
+    // A held finger drifts a pixel or two; Radix alone drops the press at
+    // the first move, which left the menu unreliable on a phone.
+    it("opens the row menu with its park actions despite a small drift", async () => {
+      render([thread({ id: "thr_lp", title: "Hold me" })]);
+      press(await screen.findByText("Hold me"), [
+        [22, 21],
+        [26, 27],
+      ]);
+      const menu = await screen.findByRole("menu", { name: "Thread actions" });
+      const items = within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent);
+      expect(items).toContain("Settle");
+      expect(items).toContain("Snooze");
+    });
+
+    // The menu opens under the finger, so the click that ends the press
+    // lands on an item. It must not settle the thread the user only held.
+    it("ignores the release click, then takes a deliberate tap", async () => {
+      let settled: string | null = null;
+      renderSlot(inbox, listProps, {
+        sidebarThreads: {
+          status: "ready",
+          threads: [thread({ id: "thr_rel", title: "Held" })],
+          projects: [sidebarProject("proj_1", "bb")],
+        },
+        rpc: {
+          listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
+          settle: (input) => {
+            settled = (input as { threadId: string }).threadId;
+            return { ok: true };
+          },
+        },
+      });
+      press(await screen.findByText("Held"), []);
+      const menu = await screen.findByRole("menu", { name: "Thread actions" });
+      const settle = within(menu).getByText("Settle");
+      fireEvent.click(settle);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(settled).toBeNull();
+      expect(screen.getByRole("menu", { name: "Thread actions" })).toBeDefined();
+
+      fireEvent.pointerDown(settle, { pointerType: "touch", isPrimary: true });
+      fireEvent.click(settle);
+      await waitFor(() => expect(settled).toBe("thr_rel"));
+    });
+
+    it("leaves a moving finger to scroll", async () => {
+      render([thread({ id: "thr_sc", title: "Scroll past" })]);
+      press(await screen.findByText("Scroll past"), [[20, 40]]);
+      expect(screen.queryByRole("menu")).toBeNull();
+    });
+  });
+
+  // The mobile route: a touch device draws no settle or snooze on the card,
+  // so the items below, opened by long-press, are the only park route there.
   it("parks a thread from the menu", async () => {
     let settled: string | null = null;
     renderSlot(inbox, listProps, {
@@ -1437,14 +1509,19 @@ describe("jump shortcuts", () => {
     expect(strip.className.split(" ")).not.toContain("hidden");
   });
 
-  // jsdom evaluates no media queries, so this pins the contract instead: with
-  // no hover, the actions are always drawn, and a long-press on the row is the
-  // row menu's rather than the browser's link callout.
-  it("draws the park actions on touch and keeps long-press for the row menu", async () => {
+  // jsdom evaluates no media queries, so this pins the contract instead: no
+  // rule draws the actions without hover, so a touch device leaves them
+  // visually hidden, and a long-press on the row is the row menu's rather than
+  // the browser's link callout.
+  it("draws no park actions on touch and keeps long-press for the row menu", async () => {
     render([thread({ id: "thr_touch" })]);
     await listReady();
     const strip = screen.getByLabelText("Settle thread").parentElement!;
-    expect(strip.className).toContain("[@media(hover:none)]:flex");
+    expect(strip.className).toContain("sr-only");
+    expect(strip.className).not.toContain("hover:none");
+    expect(screen.getByLabelText("Settle thread").className).not.toContain(
+      "hover:none",
+    );
     expect(screen.getByRole("link").className).toContain(
       "[-webkit-touch-callout:none]",
     );
