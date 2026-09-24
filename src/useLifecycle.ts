@@ -30,22 +30,48 @@ import {
   type ThreadShelf,
 } from "./lifecycle";
 
+/** bb's execution states in which the agent is inside a turn. */
+const TURN_STATUSES: ReadonlySet<string> = new Set([
+  "starting",
+  "active",
+  "stopping",
+]);
+
 /**
- * The thread's OWN live work, which blocks parking and wakes a parked thread.
+ * Whether the thread's agent is inside a turn right now: the one state in
+ * which the card counts a run's elapsed time instead of an idle age.
  *
- * Its own, and only its own: a card's spinner-and-timer is about the run this
- * thread is accruing, and a parent has no clock for a child's. Everything that
- * asks "is anything happening here" wants {@link busyThreadIds} instead.
+ * bb's execution status decides it, plus its "runtime" indicator, which is
+ * the same fact seen from the host's side. Background work does NOT count: a
+ * dev server in a background terminal, a workflow, plan mode or a goal can
+ * outlive every turn, and a thread running one is still idle as far as the
+ * prompt cache is concerned. "stopping" does count, because the turn has not
+ * ended until bb logs its end, and the age before that would be the previous
+ * turn's.
+ */
+export function isTurnRunning(thread: PluginSidebarThread): boolean {
+  return TURN_STATUSES.has(thread.status) || thread.indicator === "runtime";
+}
+
+/**
+ * Any live work on the thread itself: a turn, or anything running in the
+ * background. This, not {@link isTurnRunning}, blocks parking, wakes a parked
+ * thread and lifts the thread into the sort's working tier, because hiding a
+ * thread whose dev server or workflow is still running is the failure parking
+ * cannot afford. The server's sweep keeps its own, deliberately similar rule.
+ *
+ * Its own, and only its own. Everything that asks "is anything happening here,
+ * children included" wants {@link busyThreadIds} instead.
  */
 export function isWorking(thread: PluginSidebarThread): boolean {
   const { activity } = thread;
   return (
+    isTurnRunning(thread) ||
     activity.workflows > 0 ||
     activity.backgroundAgents > 0 ||
     activity.backgroundCommands > 0 ||
     activity.planMode > 0 ||
-    activity.goals > 0 ||
-    thread.indicator === "runtime"
+    activity.goals > 0
   );
 }
 

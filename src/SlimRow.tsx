@@ -10,6 +10,7 @@ import { RowContextMenu, type ParkMenuActions } from "./RowContextMenu";
 import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { ShortcutPill, ThreadRowLink } from "./ThreadRowLink";
 import { snoozeWakeLabel } from "./lifecycle";
+import type { CacheWindow } from "./cache-window";
 
 /**
  * A parked thread: one line instead of a card. Density comes from the user
@@ -24,6 +25,9 @@ export function SlimRow({
   shelf,
   wakeAt,
   now,
+  startedWorkingAt,
+  lastRunEndedAt,
+  cacheWindow,
   park,
   onNavigate,
   onRestore,
@@ -33,6 +37,10 @@ export function SlimRow({
   shelf: "snoozed" | "settled";
   wakeAt: number | null;
   now: number;
+  /** The card's clock inputs, so a parked row reads the same time. */
+  startedWorkingAt: number | null;
+  lastRunEndedAt: number | null;
+  cacheWindow: CacheWindow;
   /** Parking from the right-click / long-press menu, as on a card. */
   park: ParkMenuActions;
   onNavigate: () => void;
@@ -65,49 +73,52 @@ export function SlimRow({
           >
             <ThreadTitle threadId={thread.id} />
           </span>
-          {/* The same slot as a card, so a shelf keeps the card's column. A
-              snoozed row spends it on the wake time: when the thread comes
-              BACK is that shelf's whole question, and it outranks an age the
-              user has already decided to ignore.
-
-              The restore button shares this one cell instead of following it.
-              A button of its own would sit between the age and the row's edge
-              and push the whole column off the card's, which is the one thing
-              the fixed slot exists to prevent. */}
-          <span
-            className={cn(
-              STATUS_SLOT_CLASS,
-              "pointer-events-none relative tabular-nums text-2xs text-muted-foreground/60",
-            )}
-          >
-            <span className="flex items-center group-hover/slim:opacity-0">
-              {shortcut !== null ? (
-                <ShortcutPill shortcut={shortcut} />
-              ) : shelf === "snoozed" && wakeAt !== null ? (
-                snoozeWakeLabel(wakeAt, now)
-              ) : (
-                <StatusOrTime thread={thread} now={now} />
-              )}
+          {/* Left of the slot, as on a card: the jump key while the modifier
+              is held; otherwise, for a snoozed row, when it comes back, which
+              yields on hover to the restore button. The slot itself keeps the
+              card's glyph and clock, in the card's column. */}
+          {shortcut !== null ? (
+            <ShortcutPill shortcut={shortcut} />
+          ) : (
+            <span className="relative flex shrink-0 items-center">
+              {shelf === "snoozed" && wakeAt !== null ? (
+                <span
+                  aria-label={`Wakes in ${snoozeWakeLabel(wakeAt, now)}`}
+                  className="pointer-events-none flex items-center gap-0.5 text-2xs tabular-nums text-muted-foreground/60 group-hover/slim:hidden group-has-[:focus-visible]/slim:hidden"
+                >
+                  <Icon name="Clock" className="size-3" aria-hidden />
+                  {snoozeWakeLabel(wakeAt, now)}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                aria-label={
+                  shelf === "snoozed" ? "Wake thread now" : "Un-settle thread"
+                }
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRestore();
+                }}
+                className="pointer-events-auto hidden cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground group-hover/slim:flex group-has-[:focus-visible]/slim:flex"
+              >
+                <Icon
+                  name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}
+                  className="size-3.5"
+                />
+              </button>
             </span>
-            <button
-              type="button"
-              aria-label={
-                shelf === "snoozed" ? "Wake thread now" : "Un-settle thread"
-              }
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onRestore();
-              }}
-              // Pulled right by its own padding, so the icon — not the hit
-              // area — lands on the column.
-              className="pointer-events-auto absolute -right-0.5 top-1/2 cursor-pointer -translate-y-1/2 rounded p-0.5 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover/slim:opacity-100"
-            >
-              <Icon
-                name={shelf === "snoozed" ? "Clock" : "ArrowTurnBackward"}
-                className="size-3.5"
-              />
-            </button>
+          )}
+          <span
+            className={cn(STATUS_SLOT_CLASS, "pointer-events-none relative")}
+          >
+            <StatusOrTime
+              thread={thread}
+              now={now}
+              startedWorkingAt={startedWorkingAt}
+              lastRunEndedAt={lastRunEndedAt}
+              cacheWindow={cacheWindow}
+            />
           </span>
         </div>
       </li>

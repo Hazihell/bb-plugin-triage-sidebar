@@ -121,10 +121,14 @@ export function ThreadCard({
             <span className="min-w-0 flex-1 truncate text-2xs font-medium text-muted-foreground">
               {projectName ?? " "}
             </span>
-            {/* Status at rest, park actions on hover. Only the status yields,
-                so the project name never shifts. */}
-            {park.canPark && shortcut === null ? (
-              <span className="pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex">
+            {/* Left of the slot, never in it: the jump key while the
+                modifier is held, otherwise the park actions on hover or
+                keyboard focus. The slot keeps its glyph and clock through
+                all of it. */}
+            {shortcut !== null ? (
+              <ShortcutPill shortcut={shortcut} />
+            ) : park.canPark ? (
+              <span className="pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex group-has-[:focus-visible]/card:flex">
                 <ParkButton
                   label="Snooze until tomorrow"
                   icon="Clock"
@@ -141,24 +145,15 @@ export function ThreadCard({
                 />
               </span>
             ) : null}
-            <span
-              className={cn(
-                STATUS_SLOT_CLASS,
-                park.canPark && shortcut === null && "group-hover/card:hidden",
-              )}
-            >
-              {shortcut !== null ? (
-                <ShortcutPill shortcut={shortcut} />
-              ) : (
-                <StatusOrTime
-                  thread={thread}
-                  now={now}
-                  startedWorkingAt={startedWorkingAt}
-                  lastRunEndedAt={lastRunEndedAt}
-                  isChildWorking={childWork.running > 0}
-                  cacheWindow={cacheWindow}
-                />
-              )}
+            <span className={STATUS_SLOT_CLASS}>
+              <StatusOrTime
+                thread={thread}
+                now={now}
+                startedWorkingAt={startedWorkingAt}
+                lastRunEndedAt={lastRunEndedAt}
+                isChildWorking={childWork.running > 0}
+                cacheWindow={cacheWindow}
+              />
             </span>
           </div>
           <div

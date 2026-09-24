@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
+  experimental_Icon as HostIcon,
   useSidebarThreadDraft,
+  useSidebarThreadRowStatus,
   type PluginSidebarThread,
+  type PluginSidebarThreadRowStatus,
 } from "@get-bb/plugin-sdk/app";
 import {
   composeIndicator,
@@ -10,7 +13,7 @@ import {
   hasStatusGlyph,
   WAITING_COLOR,
 } from "./StatusGlyph";
-import { isWorking } from "./useLifecycle";
+import { isTurnRunning } from "./useLifecycle";
 import { elapsedLabel, idleAgeLabel } from "./relative-time";
 import { cn } from "./lib/utils";
 import {
@@ -44,13 +47,18 @@ function useSecondsClock(enabled: boolean): number {
  *
  * Fixed rather than intrinsic because the label's width follows its text —
  * "59s" is wider than "7m" — and an intrinsic slot drags whatever sits beside
- * it back and forth, so no two rows agree on a column. The width holds the
- * widest thing this sidebar can produce: a glyph AND a clock side by side,
- * which is why it is wider than one label alone. Every row that carries either
- * now carries the pair, so this width is the common case rather than the
- * exception it was drawn for.
+ * it back and forth, so no two rows agree on a column. Inside it the glyph and
+ * the clock each have a fixed box of their own, so the glyphs form one column
+ * and the clocks another, and a row with no glyph keeps its clock where every
+ * other row has it.
+ *
+ * Nothing else ever enters this slot. The jump-key pill and the hover actions
+ * sit to its left, so the clock never moves and is never covered.
  */
 export const STATUS_SLOT_CLASS = "flex w-12 shrink-0 items-center justify-end";
+
+/** Wide enough for the widest label: "59m", "23h", "now". */
+const CLOCK_BOX_CLASS = "w-7 shrink-0 text-right tabular-nums text-2xs";
 
 /**
  * The box every trailing glyph sits in, whatever its artwork measures.
@@ -64,19 +72,26 @@ export const TRAILING_GLYPH_BOX_CLASS =
   "flex size-3.5 shrink-0 items-center justify-center";
 
 /**
- * Glyph on the left, a clock on the right, on every row that has either.
+ * Glyph on the left, a clock on the right, on every row.
  *
- * The slot used to spend itself on one or the other, on the reasoning that a
- * glyph makes an age redundant. It does not. The glyph says what state the
- * thread is in; the age says how long it has been in it, and on an idle thread
- * that is the number that decides whether replying resumes a cached
- * conversation or pays to rebuild one. So the two now share the slot.
+ * The clock is ALWAYS drawn. The glyph says what state the thread is in; the
+ * clock says how long it has been in it, and on an idle thread that is the
+ * number that decides whether replying resumes a cached conversation or pays
+ * to rebuild one. No glyph, key pill or action ever takes its place.
  *
- * Which clock depends on whose run it is. The thread's OWN run is a duration
- * being accrued, counted from when bb reported it starting. Anything else is
- * an idle age, counted from when its own last run ENDED — including while a
- * child is running, because a child's clock is not this card's and the sidebar
- * keeps none.
+ * Which clock depends on whether the thread's agent is inside a turn. A turn
+ * is a duration being accrued, counted from when bb logged it starting.
+ * Anything else is an idle age, counted from when the last turn ENDED —
+ * including while background work runs, since a dev server or a workflow does
+ * not keep the prompt cache warm, and while a child runs, because a child's
+ * clock is not this card's.
+ *
+ * Two rows have no such clock, and both still get a time:
+ * - A thread that has never finished a turn shows how long since bb last
+ *   recorded activity on it, dimmed and never amber: it is not a cache clock,
+ *   and colouring it would claim a cache that does not exist.
+ * - A running turn whose start the store has not read yet (the few seconds
+ *   after a reload) shows a dash until it has.
  */
 export function StatusOrTime({
   thread,
@@ -89,82 +104,144 @@ export function StatusOrTime({
   thread: PluginSidebarThread;
   /** Quantized clock, shared by every row in one render. */
   now: number;
-  /**
-   * When bb recorded this run starting, from the plugin's lifecycle store.
-   * Optional and null by default: a caller that has not wired the store yet
-   * keeps today's behaviour rather than breaking.
-   */
+  /** When bb logged the running turn starting, or null. */
   startedWorkingAt?: number | null;
-  /**
-   * When the thread's newest turn ended, from bb's event log. Null means no
-   * turn has ended yet, and the slot shows no age rather than a wrong one.
-   */
+  /** When the thread's newest turn ended, from bb's event log, or null. */
   lastRunEndedAt?: number | null;
   /** A direct child is running while this thread itself is not. */
   isChildWorking?: boolean;
   cacheWindow?: CacheWindow;
 }) {
-  const isOwnRunLive = isWorking(thread);
-  const isRunning = startedWorkingAt !== null && isOwnRunLive;
-  const liveNow = useSecondsClock(isRunning);
+  const isRunning = isTurnRunning(thread);
+  const liveNow = useSecondsClock(isRunning && startedWorkingAt !== null);
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
+  const rowStatus = useSidebarThreadRowStatus(thread.id);
+  // Another plugin's row status goes exactly where bb puts it: in the draft
+  // glyph's place, with the draft's precedence, so it never hides a question,
+  // a failure or an unread result.
   const indicator = composeIndicator(
     thread.indicator,
-    hasUnsubmittedDraft,
-    isOwnRunLive,
+    hasUnsubmittedDraft || rowStatus !== null,
+    isRunning,
   );
-  const indicatorLabel =
-    indicator === "draft" || indicator === "working-draft"
-      ? DRAFT_INDICATOR_LABELS[indicator]
-      : thread.indicatorLabel;
+  const isDraftPlace = indicator === "draft" || indicator === "working-draft";
 
-  if (isOwnRunLive) {
-    const clock = Math.max(liveNow, now);
+  let glyph: ReactNode = null;
+  if (isDraftPlace && rowStatus !== null) {
+    glyph = <RowStatusGlyph status={rowStatus} />;
+  } else if (hasStatusGlyph(indicator)) {
+    glyph = (
+      <StatusGlyph
+        indicator={indicator}
+        label={
+          isDraftPlace ? DRAFT_INDICATOR_LABELS[indicator] : thread.indicatorLabel
+        }
+      />
+    );
+  } else if (isRunning) {
+    // Something is running and bb named no glyph for it; the slot must still
+    // say so.
+    glyph = <StatusGlyph indicator="runtime" label={thread.indicatorLabel} />;
+  } else if (isChildWorking) {
+    // The thread is quiet and its children are not. The spinner is the
+    // sidebar's word for "something is running", and the flat list has
+    // nowhere else to say it.
+    glyph = <StatusGlyph indicator="runtime" label="Child thread working" />;
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <span className={TRAILING_GLYPH_BOX_CLASS}>{glyph}</span>
+      <Clock
+        isRunning={isRunning}
+        startedWorkingAt={startedWorkingAt}
+        lastRunEndedAt={lastRunEndedAt}
+        lastActivityAt={thread.latestAttentionAt}
+        now={now}
+        liveNow={liveNow}
+        cacheWindow={cacheWindow}
+      />
+    </span>
+  );
+}
+
+function Clock({
+  isRunning,
+  startedWorkingAt,
+  lastRunEndedAt,
+  lastActivityAt,
+  now,
+  liveNow,
+  cacheWindow,
+}: {
+  isRunning: boolean;
+  startedWorkingAt: number | null;
+  lastRunEndedAt: number | null;
+  lastActivityAt: number;
+  now: number;
+  liveNow: number;
+  cacheWindow: CacheWindow;
+}) {
+  if (isRunning) {
+    if (startedWorkingAt === null) {
+      return (
+        <span
+          className={cn(CLOCK_BOX_CLASS, "text-muted-foreground/50")}
+          title="Turn running; start time not read yet"
+        >
+          –
+        </span>
+      );
+    }
     return (
-      <span className="flex items-center gap-1">
-        {/* The thread's own glyph when it has one, so a workflow still reads
-            as a workflow; the runtime spinner otherwise, because something is
-            running and the slot must say so. */}
-        <StatusGlyph
-          indicator={hasStatusGlyph(indicator) ? indicator : "runtime"}
-          label={indicatorLabel}
-        />
-        {/* No idle age here, ever, even when the store has no start time: this
-            thread is not idle, and its clock is simply unknown. */}
-        {startedWorkingAt === null ? null : (
-          <span className="tabular-nums text-2xs text-muted-foreground">
-            {elapsedLabel(startedWorkingAt, clock)}
-          </span>
-        )}
+      // Never coloured: a turn in flight is not yet a cache question.
+      <span className={cn(CLOCK_BOX_CLASS, "text-muted-foreground")}>
+        {elapsedLabel(startedWorkingAt, Math.max(liveNow, now))}
       </span>
     );
   }
-
-  const idleSince = lastRunEndedAt ?? null;
+  if (lastRunEndedAt === null) {
+    return (
+      <span
+        className={cn(CLOCK_BOX_CLASS, "text-muted-foreground/50")}
+        title="No finished turn yet; time since last activity"
+      >
+        {idleAgeLabel(lastActivityAt, now)}
+      </span>
+    );
+  }
   return (
-    <span className="flex items-center gap-1">
-      {hasStatusGlyph(indicator) ? (
-        <StatusGlyph indicator={indicator} label={indicatorLabel} />
-      ) : isChildWorking ? (
-        // The thread is quiet and its children are not. The spinner is the
-        // sidebar's word for "something is running", and the flat list has
-        // nowhere else to say it.
-        <StatusGlyph indicator="runtime" label="Child thread working" />
-      ) : null}
-      {idleSince === null ? null : (
-        <span
-          className={cn(
-            "tabular-nums text-2xs",
-            // Only the idle age is ever coloured. An own-run timer counts work
-            // in flight, where the cache window is not yet a question.
-            isCacheWarning(now - idleSince, cacheWindow)
-              ? WAITING_COLOR
-              : "text-muted-foreground",
-          )}
-        >
-          {idleAgeLabel(idleSince, now)}
-        </span>
+    <span
+      className={cn(
+        CLOCK_BOX_CLASS,
+        isCacheWarning(now - lastRunEndedAt, cacheWindow)
+          ? WAITING_COLOR
+          : "text-muted-foreground",
       )}
+    >
+      {idleAgeLabel(lastRunEndedAt, now)}
     </span>
+  );
+}
+
+/**
+ * A status another plugin set on this row, drawn with bb's own treatment for
+ * its tone: a running status shimmers, a finished one is static in the
+ * success or failure colour, and anything else is neutral.
+ */
+function RowStatusGlyph({ status }: { status: PluginSidebarThreadRowStatus }) {
+  const tone = status.tone ?? "default";
+  return (
+    <HostIcon
+      name={status.icon}
+      aria-label={status.label}
+      className={cn(
+        "size-3.5 shrink-0",
+        tone === "running" && "animate-shine-icon text-success",
+        tone === "success" && "text-success-foreground",
+        tone === "error" && "text-destructive",
+        tone === "default" && "text-muted-foreground",
+      )}
+    />
   );
 }

@@ -129,9 +129,25 @@ describe("ThreadInbox", () => {
     );
     const link = screen.getByRole("link");
     // A real link: the host routes the plain click in place, so the row lets
-    // it through rather than opening the thread itself.
-    expect(link.getAttribute("href")).toBe("/projects/proj_1/threads/thr_open");
-    expect(fireEvent.click(link)).toBe(true);
+    // it through rather than opening the thread itself. The host's router is
+    // a bubbling document listener that cancels the click it routes; this one
+    // stands in for it, so jsdom never tries to navigate, and records whether
+    // the row had already cancelled the click before the router saw it.
+    let cancelledByRow: boolean | null = null;
+    const router = (event: MouseEvent) => {
+      cancelledByRow = event.defaultPrevented;
+      event.preventDefault();
+    };
+    document.addEventListener("click", router);
+    try {
+      expect(link.getAttribute("href")).toBe(
+        "/projects/proj_1/threads/thr_open",
+      );
+      fireEvent.click(link);
+    } finally {
+      document.removeEventListener("click", router);
+    }
+    expect(cancelledByRow).toBe(false);
     expect(rendered.sidebarActionCalls).toEqual([]);
     expect(navigated).toBe(1);
   });
@@ -320,7 +336,10 @@ describe("parking threads", () => {
   });
 
   it("shows the wake countdown on a snoozed row", async () => {
-    const wakeAt = Date.now() + 2 * 60 * 60 * 1000;
+    // Anchored to the minute the list's clock is quantized to, so the
+    // countdown's rounding cannot tip it into the next hour.
+    const wakeAt =
+      Math.floor(Date.now() / 60_000) * 60_000 + 2 * 60 * 60 * 1000;
     renderSlot(inbox, listProps, {
       sidebarThreads: {
         status: "ready",
@@ -344,8 +363,10 @@ describe("parking threads", () => {
     });
     const shelf = await screen.findByRole("region", { name: "Snoozed" });
     fireEvent.click(within(shelf).getByRole("button"));
-    expect(within(shelf).getByText("2h")).toBeDefined();
-    expect(within(shelf).getByLabelText("Wake thread now")).toBeDefined();
+    expect(within(shelf).getByLabelText("Wakes in 2h")).toBeDefined();
+    expect(
+      within(shelf).getByRole("button", { name: "Wake thread now", hidden: true }),
+    ).toBeDefined();
   });
 });
 
@@ -888,17 +909,26 @@ describe("card metadata", () => {
     expect(await screen.findByText("3h")).toBeDefined();
   });
 
-  // No turn has ended, so there is no cache window to measure. bb's updatedAt
-  // would put a number here, and it would be the wrong one.
-  it("shows no age for a thread whose turn has never ended", async () => {
-    render([thread({ id: "thr_new", updatedAt: THREE_HOURS_AGO() })]);
-    expect(await screen.findByRole("link")).toBeDefined();
-    expect(screen.queryByText("3h")).toBeNull();
+  // No turn has ended, so there is no cache window to measure; but the time is
+  // never left out. The slot falls back to bb's last activity on the thread,
+  // dimmed and never amber, because it is not a cache clock. bb's updatedAt is
+  // not that clock: it moves on a rename or a pin.
+  it("shows the last activity, dimmed, for a thread whose turn has never ended", async () => {
+    render([
+      thread({
+        id: "thr_new",
+        latestAttentionAt: THREE_HOURS_AGO(),
+        updatedAt: Date.now(),
+      }),
+    ]);
+    const label = await screen.findByText("3h");
+    expect(label.className).toContain("text-muted-foreground/50");
+    expect(label.getAttribute("title")).toMatch(/no finished turn/i);
   });
 
-  // The one row that spends the slot on a glyph alone: its own run is live, so
-  // there is no idle age to show, and the store has no start time to count.
-  it("shows no age while the thread's own run is live", async () => {
+  // A turn is running, so there is no idle age to show, and the store has not
+  // read the start yet: the clock holds a dash rather than a wrong number.
+  it("shows a dash, not an age, while a turn runs with no start time", async () => {
     render([
       thread({
         id: "thr_run",
@@ -909,6 +939,56 @@ describe("card metadata", () => {
     ]);
     expect(await screen.findByLabelText("Agent is working")).toBeDefined();
     expect(screen.queryByText("3h")).toBeNull();
+    expect(screen.getByText("–")).toBeDefined();
+  });
+
+  // The bug this rule was written for: a background terminal is not a turn.
+  // The thread is idle as far as the prompt cache goes, so it keeps its idle
+  // age and the terminal glyph sits beside it.
+  it("keeps the idle age beside a background-work glyph", async () => {
+    render(
+      [
+        thread({
+          id: "thr_bg",
+          indicator: "background-command",
+          indicatorLabel: "Background command running",
+          activity: {
+            workflows: 0,
+            backgroundAgents: 0,
+            backgroundCommands: 1,
+            planMode: 0,
+            goals: 0,
+          },
+        }),
+      ],
+      undefined,
+      { thr_bg: THREE_HOURS_AGO() },
+    );
+    expect(
+      await screen.findByLabelText("Background command running"),
+    ).toBeDefined();
+    expect(screen.getByText("3h")).toBeDefined();
+    // Still live work, though: it may not be parked.
+    expect(screen.queryByLabelText("Settle thread")).toBeNull();
+  });
+
+  it("counts a running turn from bb's status, whatever the indicator", async () => {
+    const start = Math.floor(Date.now() / 60_000) * 60_000 - 4 * 60_000;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_act", status: "active" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
+          rows: [{ ...endedRow("thr_act", start - 60_000), startedWorkingAt: start }],
+        }),
+      },
+    });
+    expect(await screen.findByText("4m")).toBeDefined();
   });
 
   // An indicator this plugin does not know must fall through to the age label
@@ -1013,6 +1093,47 @@ describe("unsent drafts", () => {
     expect(screen.queryByLabelText("Thread working")).toBeNull();
   });
 
+  // Another plugin's row status goes where bb draws it: in the draft glyph's
+  // place, with the draft's precedence.
+  it("draws another plugin's row status in the draft's place", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_rs" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarDraftThreadIds: ["thr_rs"],
+      sidebarRowStatuses: {
+        thr_rs: { icon: "Zap", label: "Deploying", tone: "running" },
+      },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
+    });
+    const glyph = await screen.findByLabelText("Deploying");
+    expect(glyph.getAttribute("class")).toContain("animate-shine-icon");
+    expect(screen.queryByLabelText("Thread has unsubmitted draft")).toBeNull();
+  });
+
+  it("never lets a row status hide a question", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({
+            id: "thr_rq",
+            hasPendingInteraction: true,
+            indicator: "waiting-for-input",
+            indicatorLabel: "Thread needs user input",
+          }),
+        ],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      sidebarRowStatuses: { thr_rq: { icon: "Zap", label: "Deploying" } },
+      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
+    });
+    expect(await screen.findByLabelText("Thread needs user input")).toBeDefined();
+    expect(screen.queryByLabelText("Deploying")).toBeNull();
+  });
+
   it("never hides a thread that is waiting on you", async () => {
     renderWithDraft(
       thread({
@@ -1028,7 +1149,7 @@ describe("unsent drafts", () => {
 });
 
 describe("jump shortcuts", () => {
-  it("shows the key bb assigned in place of the status while held", async () => {
+  it("shows the key bb assigned beside the status while held", async () => {
     renderSlot(inbox, listProps, {
       sidebarThreads: {
         status: "ready",
@@ -1042,10 +1163,18 @@ describe("jump shortcuts", () => {
         projects: [sidebarProject("proj_1", "bb")],
       },
       sidebarShortcuts: { thr_k: { label: "⌘1", ariaKeyshortcuts: "Meta+1" } },
-      rpc: { listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }) },
+      rpc: {
+        listLifecycle: () => ({
+          epoch: "test",
+          seq: 0,
+          rows: [endedRow("thr_k", THREE_HOURS_AGO())],
+        }),
+      },
     });
     expect(await screen.findByText("⌘1")).toBeDefined();
-    expect(screen.queryByLabelText("Unread thread succeeded")).toBeNull();
+    // Nothing replaces the status or the time.
+    expect(screen.getByLabelText("Unread thread succeeded")).toBeDefined();
+    expect(screen.getByText("3h")).toBeDefined();
     expect(screen.getByRole("link").getAttribute("aria-keyshortcuts")).toBe(
       "Meta+1",
     );

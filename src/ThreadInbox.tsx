@@ -19,6 +19,7 @@ import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { isWorking, useLifecycle } from "./useLifecycle";
 import { useCacheWindow } from "./useCacheWindow";
+import type { CacheWindow } from "./cache-window";
 import { useProjectAvatars } from "./useProjectAvatars";
 import { ProjectAvatar } from "./ProjectAvatar";
 import { TRAILING_GLYPH_BOX_CLASS } from "./StatusSlot";
@@ -266,6 +267,8 @@ export function ThreadInbox({
               lifecycle={lifecycle}
               parkFor={parkFor}
               onNavigate={onNavigate}
+              now={now}
+              cacheWindow={cacheWindow}
             />
             <ParkedShelf
               label="Settled"
@@ -277,6 +280,8 @@ export function ThreadInbox({
               lifecycle={lifecycle}
               parkFor={parkFor}
               onNavigate={onNavigate}
+              now={now}
+              cacheWindow={cacheWindow}
             />
           </>
         )}
@@ -300,6 +305,8 @@ function ParkedShelf({
   lifecycle,
   parkFor,
   onNavigate,
+  now,
+  cacheWindow,
 }: {
   label: string;
   threads: readonly PluginSidebarThread[];
@@ -310,9 +317,10 @@ function ParkedShelf({
   lifecycle: ReturnType<typeof useLifecycle>;
   parkFor: (thread: PluginSidebarThread) => ParkMenuActions;
   onNavigate: () => void;
+  now: number;
+  cacheWindow: CacheWindow;
 }) {
   if (threads.length === 0) return null;
-  const now = Date.now();
   return (
     <section aria-label={label}>
       <button
@@ -347,6 +355,9 @@ function ParkedShelf({
               shelf={shelf}
               wakeAt={lifecycle.wakeAtFor(thread)}
               now={now}
+              startedWorkingAt={lifecycle.startedWorkingAtFor(thread.id)}
+              lastRunEndedAt={lifecycle.lastRunEndedAtFor(thread.id)}
+              cacheWindow={cacheWindow}
               park={parkFor(thread)}
               onNavigate={onNavigate}
               onRestore={() =>

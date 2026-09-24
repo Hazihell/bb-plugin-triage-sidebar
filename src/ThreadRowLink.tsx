@@ -12,9 +12,9 @@ import {
  * It carries the thread's real `href`, so the host routes a plain click in
  * place, and middle-click, copy-link and open-in-new-window work as they do
  * on any link. The row only steps in for the one gesture a link cannot
- * express: Cmd/Ctrl-click opens a split while splits are available, and falls
- * through to the browser's own new-window behaviour when they are not, which
- * is what bb's own row does.
+ * express: Cmd/Ctrl-click opens a split while splits are available. When they
+ * are not, the row leaves the click alone and the host's link router takes it
+ * and navigates in place, which is what bb's own row does.
  */
 export function ThreadRowLink({
   thread,
@@ -51,10 +51,10 @@ export function ThreadRowLink({
 }
 
 /**
- * The key bb assigns a row while the command modifier is held, drawn in place
- * of the row's status the way bb's own list draws it. The hook reports null
- * the rest of the time, so the status slot is only borrowed while the key is
- * down.
+ * The key bb assigns a row while the command modifier is held. The hook
+ * reports null the rest of the time. Rows draw it just left of the status
+ * slot, never in it: bb's own list swaps its status for the key, but this
+ * sidebar's slot carries the idle age, and that is never hidden.
  */
 export function ShortcutPill({
   shortcut,
