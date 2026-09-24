@@ -299,6 +299,7 @@ describe("parking threads", () => {
           thread({
             id: "thr_busy",
             title: "Still running",
+            status: "active",
             indicator: "runtime",
             activity: {
               workflows: 0,
@@ -436,7 +437,12 @@ describe("working duration", () => {
       sidebarThreads: {
         status: "ready",
         threads: [
-          thread({ id: "thr_run", title: "Running", indicator: "runtime" }),
+          thread({
+            id: "thr_run",
+            title: "Running",
+            status: "active",
+            indicator: "runtime",
+          }),
         ],
         projects: [sidebarProject("proj_1", "bb")],
       },
@@ -519,10 +525,45 @@ describe("child work", () => {
     }),
   ];
 
+  const runningChild = () =>
+    parentAndChild({
+      status: "active",
+      indicator: "runtime",
+      indicatorLabel: "Working",
+    });
+
+  // Seen in the live app: bb rolls a running child up into the parent's own
+  // indicator. The parent is still idle — its status says so — and keeps its
+  // idle age rather than a dash for a turn it is not running.
+  it("keeps the parent's idle age when bb rolls the child's run up", async () => {
+    render(
+      [
+        thread({
+          id: "thr_parent",
+          title: "Parent",
+          indicator: "runtime",
+          indicatorLabel: "Thread working",
+        }),
+        thread({
+          id: "thr_child",
+          title: "Child",
+          parentThreadId: "thr_parent",
+          status: "active",
+          indicator: "runtime",
+        }),
+      ],
+      undefined,
+      { thr_parent: THREE_HOURS_AGO() },
+    );
+    expect(await screen.findByLabelText("Thread working")).toBeDefined();
+    expect(screen.getByText("3h")).toBeDefined();
+    expect(screen.queryByText("–")).toBeNull();
+  });
+
   // The whole point: the child is not in the list, so without this the parent
   // is a card with nothing to say while its subagent works.
   it("spins the parent's slot while a child is running", async () => {
-    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    render(runningChild());
     expect(await screen.findByLabelText("Child thread working")).toBeDefined();
   });
 
@@ -530,7 +571,7 @@ describe("child work", () => {
   // is no child clock anywhere in this sidebar.
   it("keeps the parent's idle age beside that spinner", async () => {
     render(
-      parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }),
+      runningChild(),
       undefined,
       { thr_parent: THREE_HOURS_AGO() },
     );
@@ -539,7 +580,7 @@ describe("child work", () => {
   });
 
   it("counts running children on the parent's third line", async () => {
-    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    render(runningChild());
     expect(await screen.findByLabelText("1 running child threads")).toBeDefined();
     expect(screen.queryByLabelText(/child threads needing you/)).toBeNull();
   });
@@ -560,7 +601,7 @@ describe("child work", () => {
   // Busy is what decides parking, so the parent may not be filed away while
   // work it cannot see is still running.
   it("refuses to park a parent whose child is working", async () => {
-    render(parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }));
+    render(runningChild());
     expect(await screen.findByText("Parent")).toBeDefined();
     expect(screen.queryByLabelText("Settle thread")).toBeNull();
   });
@@ -573,6 +614,7 @@ describe("child work", () => {
         id: "thr_child",
         title: "Child",
         parentThreadId: "thr_parent",
+        status: "active",
         indicator: "runtime",
         latestAttentionAt: 1,
       }),
@@ -860,7 +902,12 @@ describe("row context menu", () => {
   // route around the card's own refusal.
   it("hides the park actions on a working thread", async () => {
     render([
-      thread({ id: "thr_busy", title: "Still running", indicator: "runtime" }),
+      thread({
+        id: "thr_busy",
+        title: "Still running",
+        status: "active",
+        indicator: "runtime",
+      }),
     ]);
     fireEvent.contextMenu(await screen.findByText("Still running"));
     const menu = await screen.findByRole("menu", { name: "Thread actions" });
@@ -993,6 +1040,7 @@ describe("card metadata", () => {
     render([
       thread({
         id: "thr_run",
+        status: "active",
         indicator: "runtime",
         indicatorLabel: "Agent is working",
         updatedAt: Date.now() - (3 * 3_600_000 + 60_000),
@@ -1109,6 +1157,7 @@ describe("attention states", () => {
       thread({
         id: "thr_busy",
         isUnread: true,
+        status: "active",
         indicator: "runtime",
         indicatorLabel: "Thread working",
       }),
@@ -1144,6 +1193,7 @@ describe("unsent drafts", () => {
     renderWithDraft(
       thread({
         id: "thr_wd",
+        status: "active",
         indicator: "runtime",
         indicatorLabel: "Thread working",
       }),

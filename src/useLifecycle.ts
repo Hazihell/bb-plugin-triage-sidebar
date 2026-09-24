@@ -42,8 +42,11 @@ const TURN_STATUSES: ReadonlySet<string> = new Set([
  * Whether the thread's agent is inside a turn right now: the one state in
  * which the card counts a run's elapsed time instead of an idle age.
  *
- * bb's execution status decides it, plus its "runtime" indicator, which is
- * the same fact seen from the host's side. Background work does NOT count: a
+ * bb's execution status decides it, and nothing else. Not the "runtime"
+ * indicator: bb rolls a running child up into its parent's indicator, so a
+ * parent idle for an hour reads "runtime" while its subagent works, and would
+ * lose its idle age to a timer it has no start for. Background work does NOT
+ * count either: a
  * dev server in a background terminal, a workflow, plan mode or a goal can
  * outlive every turn, and a thread running one is still idle as far as the
  * prompt cache is concerned. "stopping" does count, because the turn has not
@@ -51,7 +54,7 @@ const TURN_STATUSES: ReadonlySet<string> = new Set([
  * turn's.
  */
 export function isTurnRunning(thread: PluginSidebarThread): boolean {
-  return TURN_STATUSES.has(thread.status) || thread.indicator === "runtime";
+  return TURN_STATUSES.has(thread.status);
 }
 
 /**
