@@ -1034,21 +1034,60 @@ describe("card metadata", () => {
     expect(label.getAttribute("title")).toMatch(/no finished turn/i);
   });
 
-  // A turn is running, so there is no idle age to show, and the store has not
-  // read the start yet: the clock holds a dash rather than a wrong number.
-  it("shows a dash, not an age, while a turn runs with no start time", async () => {
-    render([
+  // A turn is running and the server has not pushed its logged start yet.
+  // Nothing replaces the time: the clock counts from when this client saw the
+  // turn, then steps to the logged start when it lands.
+  it("counts a new turn from when it was seen until the logged start lands", async () => {
+    const rendered = render([
       thread({
         id: "thr_run",
         status: "active",
         indicator: "runtime",
         indicatorLabel: "Agent is working",
-        updatedAt: Date.now() - (3 * 3_600_000 + 60_000),
+        latestAttentionAt: Date.now() - (3 * 3_600_000 + 60_000),
       }),
     ]);
     expect(await screen.findByLabelText("Agent is working")).toBeDefined();
+    expect(screen.getByText(/^\d+s$/)).toBeDefined();
+    expect(screen.queryByText("–")).toBeNull();
+
+    const logged = Date.now() - 4 * 60_000 - 5_000;
+    await rendered.emitRealtime("lifecycle", {
+      kind: "row",
+      epoch: "test",
+      seq: 1,
+      threadId: "thr_run",
+      row: { ...endedRow("thr_run", logged - 60_000), startedWorkingAt: logged },
+    });
+    expect(await screen.findByText("4m")).toBeDefined();
+  });
+
+  // A start saved last session belongs to a turn that is over; a turn running
+  // now must not count from it on the first frame.
+  it("ignores a turn start saved in last session's snapshot", () => {
+    localStorage.setItem(
+      "bb-plugin:triage-sidebar:lifecycle:v1",
+      JSON.stringify({
+        epoch: "old",
+        seq: 0,
+        rows: [
+          {
+            ...endedRow("thr_run", Date.now() - 4 * 3_600_000),
+            startedWorkingAt: Date.now() - 3 * 3_600_000 - 60_000,
+          },
+        ],
+      }),
+    );
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_run", status: "active", indicator: "runtime" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: { listLifecycle: () => new Promise<never>(() => {}) },
+    });
     expect(screen.queryByText("3h")).toBeNull();
-    expect(screen.getByText("–")).toBeDefined();
+    expect(screen.getByText(/^\d+s$/)).toBeDefined();
   });
 
   // The bug this rule was written for: a background terminal is not a turn.
@@ -1225,6 +1264,21 @@ describe("unsent drafts", () => {
       await screen.findByLabelText("Thread working with unsubmitted draft"),
     ).toBeDefined();
     expect(screen.queryByLabelText("Background command running")).toBeNull();
+  });
+
+  // bb rolls a running child up into the parent's "runtime" indicator and
+  // draws the working pencil for a draft on it; so does this list.
+  it("shows the working pencil on a parent whose child runs", async () => {
+    renderWithDraft(
+      thread({
+        id: "thr_pd",
+        indicator: "runtime",
+        indicatorLabel: "Thread working",
+      }),
+    );
+    expect(
+      await screen.findByLabelText("Thread working with unsubmitted draft"),
+    ).toBeDefined();
   });
 
   // Another plugin's row status follows bb's rule: shown over anything but a

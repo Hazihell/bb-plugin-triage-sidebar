@@ -78,9 +78,10 @@ Three shelves:
   Background work is not a turn: a thread whose dev server, workflow, plan or
   goal is still running keeps its idle age, with that work's glyph beside it.
   A thread that has never finished a turn shows the time since bb last saw
-  activity on it, dimmed and never amber, because it is not a cache clock. For
-  the few seconds after a reload before a running turn's start is read, the
-  time is a dash.
+  activity on it, dimmed and never amber, because it is not a cache clock. A
+  turn counts from the moment this window saw it start until the server has
+  read its logged start from bb, then steps forward to that; the logged time is
+  never later.
 
   Two things sit just left of the slot and never in it. While you hold the
   command key, bb's jump key for the row. On hover or keyboard focus, a card

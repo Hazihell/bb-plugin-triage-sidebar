@@ -139,8 +139,13 @@ export interface LifecycleApi {
   canPark(thread: PluginSidebarThread): boolean;
   wakeAtFor(thread: PluginSidebarThread): number | null;
   /**
-   * When the turn in flight started, as bb's event log recorded it, or null
-   * when no turn is running.
+   * When the turn in flight started, or null when no turn is running.
+   *
+   * bb's event log says, once the server has read it. Until then — the
+   * moment between bb marking a thread active and the server pushing the
+   * logged start — it is when this client first saw the turn running, so
+   * the clock counts from the start rather than going blank. The logged time
+   * is never later, so when it lands the timer only steps forward.
    */
   startedWorkingAtFor(threadId: string): number | null;
   /**
@@ -313,6 +318,19 @@ export function useLifecycle(
     return () => clearTimeout(timer);
   }, [now, rows]);
 
+  // When this client first saw each thread's turn running. Kept across
+  // renders and pruned when the turn ends; read only while the server has no
+  // logged start for it.
+  const firstSeenRunning = useRef(new Map<string, number>());
+  const seenRunning = firstSeenRunning.current;
+  const running = new Set<string>();
+  for (const thread of threads) {
+    if (!isTurnRunning(thread)) continue;
+    running.add(thread.id);
+    if (!seenRunning.has(thread.id)) seenRunning.set(thread.id, Date.now());
+  }
+  for (const id of seenRunning.keys()) if (!running.has(id)) seenRunning.delete(id);
+
   return useMemo<LifecycleApi>(() => {
     const busy = busyThreadIds(threads);
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
@@ -368,11 +386,10 @@ export function useLifecycle(
         resolveShelf(rows.get(thread.id), signalsFor(thread), now),
       canPark: (thread) => canPark(signalsFor(thread)),
       wakeAtFor: (thread) => rows.get(thread.id)?.snoozedUntil ?? null,
-      // `?? null` rather than a bare read: a row written before this column
-      // existed carries no value, and the caller wants "not running", not
-      // `undefined`.
       startedWorkingAtFor: (threadId) =>
-        rows.get(threadId)?.startedWorkingAt ?? null,
+        rows.get(threadId)?.startedWorkingAt ??
+        seenRunning.get(threadId) ??
+        null,
       lastRunEndedAtFor: (threadId) =>
         rows.get(threadId)?.lastRunEndedAt ?? null,
       isBusy: (thread) => busy.has(thread.id),
@@ -445,7 +462,13 @@ function readLifecycleSnapshot(): SyncState | null {
     const rows = new Map<string, ThreadLifecycleRow>();
     for (const row of value.rows) {
       if (!isRecord(row) || typeof row.threadId !== "string") return null;
-      rows.set(row.threadId, row as unknown as ThreadLifecycleRow);
+      // A turn start from last session belongs to a turn that has ended or
+      // been superseded; the client's own sighting stands in until the
+      // server answers.
+      rows.set(row.threadId, {
+        ...(row as unknown as ThreadLifecycleRow),
+        startedWorkingAt: null,
+      });
     }
     return { epoch: value.epoch, seq: value.seq, rows };
   });

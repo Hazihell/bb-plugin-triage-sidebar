@@ -67,12 +67,11 @@ export const TRAILING_GLYPH_BOX_CLASS =
  * not keep the prompt cache warm, and while a child runs, because a child's
  * clock is not this card's.
  *
- * Two rows have no such clock, and both still get a time:
- * - A thread that has never finished a turn shows how long since bb last
- *   recorded activity on it, dimmed and never amber: it is not a cache clock,
- *   and colouring it would claim a cache that does not exist.
- * - A running turn whose start the store has not read yet (the few seconds
- *   after a reload) shows a dash until it has.
+ * A thread that has never finished a turn has no idle age, and still gets a
+ * time: how long since bb last recorded activity on it, dimmed and never
+ * amber, because it is not a cache clock and colouring it would claim a cache
+ * that does not exist. A running turn always has a start (see
+ * `startedWorkingAtFor`), so its timer never goes blank.
  */
 export function StatusOrTime({
   thread,
@@ -96,7 +95,7 @@ export function StatusOrTime({
   const isRunning = isTurnRunning(thread);
   // Seconds only while there is a run to count: the list's shared clock then
   // wakes this row once a second, and every other row keeps to the minute.
-  const liveNow = useClock("second", isRunning && startedWorkingAt !== null);
+  const liveNow = useClock("second", isRunning);
   const { hasUnsubmittedDraft } = useSidebarThreadDraft(thread.id);
   const rowStatus = useSidebarThreadRowStatus(thread.id);
   // The draft ranks against ANY live work, as in bb: a thread whose turn has
@@ -105,7 +104,9 @@ export function StatusOrTime({
   const indicator = composeIndicator(
     thread.indicator,
     hasUnsubmittedDraft,
-    isWorking(thread),
+    // bb rolls a running child up into this "runtime" indicator, and draws
+    // the working pencil for it too.
+    isWorking(thread) || thread.indicator === "runtime",
   );
   const isDraftPlace = indicator === "draft" || indicator === "working-draft";
 
@@ -166,20 +167,12 @@ function Clock({
   cacheWindow: CacheWindow;
 }) {
   if (isRunning) {
-    if (startedWorkingAt === null) {
-      return (
-        <span
-          className={cn(CLOCK_BOX_CLASS, "text-muted-foreground/50")}
-          title="Turn running; start time not read yet"
-        >
-          –
-        </span>
-      );
-    }
     return (
-      // Never coloured: a turn in flight is not yet a cache question.
+      // Never coloured: a turn in flight is not yet a cache question. The
+      // start is never null while the list knows the turn is running; a
+      // caller without one counts from now rather than showing no time.
       <span className={cn(CLOCK_BOX_CLASS, "text-muted-foreground")}>
-        {elapsedLabel(startedWorkingAt, Math.max(liveNow, now))}
+        {elapsedLabel(startedWorkingAt ?? liveNow, Math.max(liveNow, now))}
       </span>
     );
   }
