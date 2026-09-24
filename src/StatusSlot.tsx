@@ -96,9 +96,8 @@ export function StatusOrTime({
    */
   startedWorkingAt?: number | null;
   /**
-   * When the thread's own last run ended. Null falls back to bb's `updatedAt`,
-   * which is what this slot read before the store recorded run ends and what
-   * every thread that predates the column still has.
+   * When the thread's newest turn ended, from bb's event log. Null means no
+   * turn has ended yet, and the slot shows no age rather than a wrong one.
    */
   lastRunEndedAt?: number | null;
   /** A direct child is running while this thread itself is not. */
@@ -141,8 +140,7 @@ export function StatusOrTime({
     );
   }
 
-  const idleSince = lastRunEndedAt ?? thread.updatedAt;
-  const age = idleAgeLabel(idleSince, now);
+  const idleSince = lastRunEndedAt ?? null;
   return (
     <span className="flex items-center gap-1">
       {hasStatusGlyph(indicator) ? (
@@ -153,18 +151,20 @@ export function StatusOrTime({
         // nowhere else to say it.
         <StatusGlyph indicator="runtime" label="Child thread working" />
       ) : null}
-      <span
-        className={cn(
-          "tabular-nums text-2xs",
-          // Only the idle age is ever coloured. An own-run timer counts work
-          // in flight, where the cache window is not yet a question.
-          isCacheWarning(now - idleSince, cacheWindow)
-            ? WAITING_COLOR
-            : "text-muted-foreground",
-        )}
-      >
-        {age}
-      </span>
+      {idleSince === null ? null : (
+        <span
+          className={cn(
+            "tabular-nums text-2xs",
+            // Only the idle age is ever coloured. An own-run timer counts work
+            // in flight, where the cache window is not yet a question.
+            isCacheWarning(now - idleSince, cacheWindow)
+              ? WAITING_COLOR
+              : "text-muted-foreground",
+          )}
+        >
+          {idleAgeLabel(idleSince, now)}
+        </span>
+      )}
     </span>
   );
 }

@@ -16,6 +16,7 @@ import plugin, {
   parseAutoArchiveIntervalHours,
   parseCacheWindow,
   nextAutoArchiveRunAt,
+  BACKFILL_DELAY_MS,
   type AutoArchiveSweepResult,
   type StoredAvatarRow,
   type StoredLifecycleRow,
@@ -89,17 +90,94 @@ describe("parseAutoArchiveDays", () => {
   });
 });
 
-describe("working duration", () => {
-  it("records the start when bb reports a thread going active", async () => {
-    const host = load();
-    const before = Date.now();
-    await host.harness.behavior.emitThreadEvent("thread.active", {
-      thread: makeThreadResponse({ id: "thr_run" }),
+interface LogRow {
+  seq: number;
+  createdAt: number;
+  type: "turn/started" | "turn/completed";
+}
+
+/**
+ * bb's event log for a few threads, answering `events.list` and `events.wait`
+ * the way the server does: newest first by sequence, filtered by type. Rows
+ * pushed later are what a wait resolves with, which is how a test plays a row
+ * landing a moment after the status event that announced it.
+ */
+function eventLog(initial: Record<string, LogRow[]> = {}) {
+  const rows: Record<string, LogRow[]> = structuredClone(initial);
+  const waiters: Array<{
+    threadId: string;
+    type: string;
+    afterSeq: number;
+    resolve: (row: LogRow | null) => void;
+  }> = [];
+  const newest = (threadId: string, types: readonly string[]) =>
+    (rows[threadId] ?? [])
+      .filter((row) => types.includes(row.type))
+      .sort((a, b) => b.seq - a.seq);
+  return {
+    /** Lands a row; `quietly` leaves open waits waiting until `flush`. */
+    push(threadId: string, row: LogRow, quietly = false) {
+      (rows[threadId] ??= []).push(row);
+      if (!quietly) this.flush();
+    },
+    /** Answers every open wait whose row has landed. */
+    flush() {
+      for (const waiter of [...waiters]) {
+        const [row] = newest(waiter.threadId, [waiter.type])
+          .filter((candidate) => candidate.seq > waiter.afterSeq)
+          .reverse();
+        if (row === undefined) continue;
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve(row);
+      }
+    },
+    sdk: {
+      list: (args: {
+        threadId: string;
+        types?: readonly string[];
+        limit?: string;
+      }) =>
+        newest(args.threadId, args.types ?? []).slice(
+          0,
+          Number(args.limit ?? "100"),
+        ),
+      wait: (args: { threadId: string; type: string; afterSeq?: string }) => {
+        const afterSeq = Number(args.afterSeq ?? "0");
+        const [found] = newest(args.threadId, [args.type])
+          .filter((row) => row.seq > afterSeq)
+          .reverse();
+        if (found !== undefined) return found;
+        return new Promise<LogRow | null>((resolve) =>
+          waiters.push({ threadId: args.threadId, type: args.type, afterSeq, resolve }),
+        );
+      },
+    },
+  };
+}
+
+/** Lets handlers that awaited the fake log finish their writes. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("turn timing", () => {
+  const T = 1_790_000_000_000;
+
+  it("stores the start of the turn in flight from the log", async () => {
+    const log = eventLog({
+      thr_run: [
+        { seq: 1, createdAt: T, type: "turn/started" },
+        { seq: 2, createdAt: T + 5_000, type: "turn/completed" },
+        { seq: 3, createdAt: T + 60_000, type: "turn/started" },
+      ],
     });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    await host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_run", status: "active" }),
+    });
+    await settle();
 
     const [row] = await listRows(host);
-    expect(row?.threadId).toBe("thr_run");
-    expect(row?.startedWorkingAt).toBeGreaterThanOrEqual(before);
+    expect(row?.startedWorkingAt).toBe(T + 60_000);
+    expect(row?.lastRunEndedAt).toBe(T + 5_000);
     // The sidebar only re-reads on the channel, so a silent write would leave
     // the elapsed label missing until something unrelated refreshed.
     expect(
@@ -109,50 +187,141 @@ describe("working duration", () => {
     ).toBe(true);
   });
 
-  it("clears the start and records the end when the thread goes idle", async () => {
-    const host = load();
-    const before = Date.now();
-    await host.harness.behavior.emitThreadEvent("thread.active", {
-      thread: makeThreadResponse({ id: "thr_run" }),
+  // The regression the owner cares about: the idle age is the instant the
+  // turn's last response landed, not when this plugin heard about it.
+  it("stores the end as the log's turn/completed time, not the event's", async () => {
+    const log = eventLog({
+      thr_run: [
+        { seq: 1, createdAt: T, type: "turn/started" },
+        { seq: 9, createdAt: T + 42_123, type: "turn/completed" },
+      ],
     });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
     await host.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: makeThreadResponse({ id: "thr_run" }),
+      thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
       lastAssistantText: null,
     });
+    await settle();
 
-    // The row survives its own emptying: when the last run ended is the idle
-    // clock every card reads, so a row carrying only that is not empty.
     const [row] = await listRows(host);
     expect(row?.startedWorkingAt).toBeNull();
-    expect(row?.lastRunEndedAt).toBeGreaterThanOrEqual(before);
+    expect(row?.lastRunEndedAt).toBe(T + 42_123);
   });
 
-  // An idle event for a thread this store never saw start is half a
-  // transition: there is no run whose end it could be recording.
-  it("records nothing when a thread it never saw running goes idle", async () => {
-    const host = load();
-    await host.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: makeThreadResponse({ id: "thr_unseen" }),
+  // bb can announce the idle status a moment before the completion row is in
+  // the log. The newest completion then belongs to the turn BEFORE, and using
+  // it would make the age a whole turn too old.
+  it("waits for the completion row when the idle event arrives first", async () => {
+    const log = eventLog({
+      thr_run: [
+        { seq: 1, createdAt: T, type: "turn/completed" },
+        { seq: 2, createdAt: T + 10_000, type: "turn/started" },
+      ],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    const handled = host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
       lastAssistantText: null,
     });
-
+    await settle();
     expect(await listRows(host)).toEqual([]);
+
+    log.push("thr_run", { seq: 3, createdAt: T + 20_000, type: "turn/completed" });
+    await handled;
+
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T + 20_000);
   });
 
-  // A failed run has ended too, so it starts the same clock.
-  it("records the end when a run fails", async () => {
-    const host = load();
-    const before = Date.now();
-    await host.harness.behavior.emitThreadEvent("thread.active", {
-      thread: makeThreadResponse({ id: "thr_boom" }),
+  it("waits for the start row when the active event arrives first", async () => {
+    const log = eventLog({
+      thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
     });
-    await host.harness.behavior.emitThreadEvent("thread.failed", {
-      thread: makeThreadResponse({ id: "thr_boom" }),
-      error: "boom",
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    const handled = host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
+    await settle();
+    expect(await listRows(host)).toEqual([]);
+
+    log.push("thr_run", { seq: 2, createdAt: T + 7_000, type: "turn/started" });
+    await handled;
+
+    expect((await listRows(host))[0]?.startedWorkingAt).toBe(T + 7_000);
+  });
+
+  // A start still waiting for its row must not overwrite the turn's end, which
+  // a later event already recorded.
+  it("lets a later event win over a slower read", async () => {
+    const log = eventLog({
+      thr_run: [{ seq: 1, createdAt: T, type: "turn/completed" }],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    const started = host.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_run", status: "active" }),
+    });
+    await settle();
+    // The turn was so short that it started and ended before the start's
+    // wait returned, and the idle event was handled first.
+    log.push("thr_run", { seq: 2, createdAt: T + 1_000, type: "turn/started" }, true);
+    log.push("thr_run", { seq: 3, createdAt: T + 2_000, type: "turn/completed" }, true);
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
+      lastAssistantText: null,
+    });
+    log.flush();
+    await started;
 
     const [row] = await listRows(host);
-    expect(row?.lastRunEndedAt).toBeGreaterThanOrEqual(before);
+    expect(row?.startedWorkingAt).toBeNull();
+    expect(row?.lastRunEndedAt).toBe(T + 2_000);
+  });
+
+  // A failed turn still writes turn/completed (status "failed"), so it starts
+  // the idle clock the same way.
+  it("records the end when a run fails", async () => {
+    const log = eventLog({
+      thr_boom: [
+        { seq: 1, createdAt: T, type: "turn/started" },
+        { seq: 2, createdAt: T + 3_000, type: "turn/completed" },
+      ],
+    });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    await host.harness.behavior.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: "thr_boom", status: "error" }),
+      error: "boom",
+    });
+    await settle();
+
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T + 3_000);
+  });
+
+  // An unreadable log leaves the cache as it was: the last value the log
+  // confirmed beats any guess, and the next event reads again.
+  it("keeps the cached value when the log cannot be read", async () => {
+    const host = load({
+      sdk: {
+        threads: {
+          events: {
+            list: () => {
+              throw new Error("no log");
+            },
+          },
+        },
+      },
+    });
+    host.bb.storage
+      .database()
+      .prepare(
+        `INSERT INTO thread_lifecycle (thread_id, last_run_ended_at) VALUES (?, ?)`,
+      )
+      .run("thr_x", T);
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_x", status: "idle" }),
+      lastAssistantText: null,
+    });
+    await settle();
+
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T);
   });
 
   // A row written before the column existed reads as "never ran here" rather
@@ -169,47 +338,103 @@ describe("working duration", () => {
     const [row] = await listRows(host);
     expect(row?.threadId).toBe("thr_old_schema");
     expect(row?.lastRunEndedAt).toBeNull();
-
-    // A settle rewrites the whole row, and must not invent an end for a run
-    // it knows nothing about.
-    await host.harness.behavior.callRpc("settle", {
-      threadId: "thr_old_schema",
-    });
-    expect((await listRows(host))[0]?.lastRunEndedAt).toBeNull();
   });
 
-  // A parked thread's end time is the user's clock as much as bb's: settling
-  // or snoozing rewrites the row and must carry it through.
+  // Parking rewrites the row, and must carry bb's columns through untouched.
   it("keeps the end time across a settle", async () => {
-    const host = load();
-    await host.harness.behavior.emitThreadEvent("thread.active", {
-      thread: makeThreadResponse({ id: "thr_park" }),
+    const log = eventLog({
+      thr_park: [{ seq: 1, createdAt: T, type: "turn/completed" }],
     });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
     await host.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: makeThreadResponse({ id: "thr_park" }),
+      thread: makeThreadResponse({ id: "thr_park", status: "idle" }),
       lastAssistantText: null,
     });
-    const endedAt = (await listRows(host))[0]?.lastRunEndedAt;
+    await settle();
 
     await host.harness.behavior.callRpc("settle", { threadId: "thr_park" });
 
-    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(endedAt);
+    expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T);
   });
 
   it("keeps a parked thread's shelf when its run ends", async () => {
-    const host = load();
-    await host.harness.behavior.callRpc("settle", { threadId: "thr_parked" });
-    await host.harness.behavior.emitThreadEvent("thread.active", {
-      thread: makeThreadResponse({ id: "thr_parked" }),
+    const log = eventLog({
+      thr_parked: [
+        { seq: 1, createdAt: T, type: "turn/started" },
+        { seq: 2, createdAt: T + 1_000, type: "turn/completed" },
+      ],
     });
+    const host = load({ sdk: { threads: { events: log.sdk } } });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_parked" });
     await host.harness.behavior.emitThreadEvent("thread.failed", {
-      thread: makeThreadResponse({ id: "thr_parked" }),
+      thread: makeThreadResponse({ id: "thr_parked", status: "error" }),
       error: "boom",
     });
+    await settle();
 
     const [row] = await listRows(host);
     expect(row?.settledAt).not.toBeNull();
-    expect(row?.startedWorkingAt).toBeNull();
+    expect(row?.lastRunEndedAt).toBe(T + 1_000);
+  });
+
+  // Events missed while the plugin was not running — a reload, a reinstall —
+  // heal on the next load: every live thread's timing is read again, stale
+  // values included, and a start left behind by a missed idle is cleared.
+  it("backfills every live thread from the log shortly after load", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = eventLog({
+        thr_idle: [
+          { seq: 1, createdAt: T, type: "turn/started" },
+          { seq: 2, createdAt: T + 4_000, type: "turn/completed" },
+        ],
+        thr_busy: [
+          { seq: 1, createdAt: T, type: "turn/completed" },
+          { seq: 2, createdAt: T + 8_000, type: "turn/started" },
+        ],
+        thr_fresh: [],
+      });
+      const threads = [
+        makeThreadResponse({ id: "thr_idle", status: "idle" }),
+        makeThreadResponse({ id: "thr_busy", status: "active" }),
+        makeThreadResponse({ id: "thr_fresh", status: "idle" }),
+      ];
+      const host = load({
+        sdk: {
+          threads: {
+            events: log.sdk,
+            list: (args) => threads.slice(args?.offset ?? 0),
+          },
+        },
+      });
+      // Stale: an old end, and a start the plugin never saw finish.
+      host.bb.storage
+        .database()
+        .prepare(
+          `INSERT INTO thread_lifecycle (thread_id, started_working_at, last_run_ended_at)
+             VALUES (?, ?, ?)`,
+        )
+        .run("thr_idle", T + 1, T - 99_000);
+
+      await vi.advanceTimersByTimeAsync(BACKFILL_DELAY_MS + 10);
+
+      const rows = new Map((await listRows(host)).map((row) => [row.threadId, row]));
+      expect(rows.get("thr_idle")).toMatchObject({
+        startedWorkingAt: null,
+        lastRunEndedAt: T + 4_000,
+      });
+      expect(rows.get("thr_busy")).toMatchObject({
+        startedWorkingAt: T + 8_000,
+        lastRunEndedAt: T,
+      });
+      // Nothing to cache for a thread with no turns, so no row at all.
+      expect(rows.has("thr_fresh")).toBe(false);
+      expect(host.harness.inspection.sdk.callsTo("threads.list")).toEqual([
+        [{ archived: false, includeHidden: true, limit: 200, offset: 0 }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

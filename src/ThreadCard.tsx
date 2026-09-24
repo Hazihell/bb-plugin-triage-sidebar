@@ -64,8 +64,8 @@ export function ThreadCard({
    */
   startedWorkingAt: number | null;
   /**
-   * When this thread's own last run ended, or null when the store has never
-   * seen one end here. The slot falls back to bb's `updatedAt`.
+   * When this thread's newest turn ended, from bb's event log, or null when
+   * no turn has ended yet.
    */
   lastRunEndedAt: number | null;
   /**

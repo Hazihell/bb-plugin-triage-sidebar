@@ -18,6 +18,15 @@ import {
   projectAvatarRpcContract,
 } from "./project-avatar-store";
 import { reapWorktree } from "./reap";
+import {
+  forEachLimited,
+  isRunningStatus,
+  readStartedTiming,
+  readStoppedTiming,
+  readTurnTiming,
+  type TurnEventLog,
+  type TurnTiming,
+} from "./turn-timing";
 
 // Append-only: the array index IS the migration id, so an existing statement
 // can never be edited or reordered — a database that already ran statement 0
@@ -96,8 +105,8 @@ export interface StoredLifecycleRow {
   snoozedUntil: number | null;
   snoozedAt: number | null;
   /**
-   * When the thread's current run began, from bb's `thread.active` event;
-   * null whenever it is not running.
+   * When the turn in flight started — the newest `turn/started` row in bb's
+   * event log — or null whenever no turn is running.
    *
    * The frontend cannot derive this. A sidebar thread carries what is
    * happening, not since when, and a component that started its own timer
@@ -105,13 +114,13 @@ export interface StoredLifecycleRow {
    */
   startedWorkingAt: number | null;
   /**
-   * When the thread's own last run ended, as this plugin saw it; null until it
-   * has ever finished a run here.
+   * When the thread's newest turn ended — the newest `turn/completed` row in
+   * bb's event log — or null when no turn ever has.
    *
-   * bb's `updatedAt` is the nearest thing it ships, and it is not the same
-   * question: it moves when a title changes or a message is queued. The card's
-   * idle age is how long the agent has been quiet, which is what says how much
-   * of its prompt-cache window is left.
+   * A cache of the log, not a record of its own: the idle age is how much of
+   * the agent's prompt-cache window is left, so it must be the instant the
+   * last API response landed, and bb's `updatedAt` moves on renames, pins and
+   * reads. There is deliberately no fallback to it.
    */
   lastRunEndedAt: number | null;
 }
@@ -250,6 +259,11 @@ export const LIFECYCLE_CHANNEL = "lifecycle";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+
+/** How long after load the turn-timing backfill starts. */
+export const BACKFILL_DELAY_MS = 2_000;
+const BACKFILL_PAGE_SIZE = 200;
+const BACKFILL_CONCURRENCY = 6;
 
 /**
  * How often the schedule TICKS — not how often the sweep runs.
@@ -646,54 +660,115 @@ export default function plugin(bb: BbPluginApi) {
   };
 
   /**
-   * Record — or clear — when the current run began.
+   * Store a thread's turn timing as bb's event log reports it.
    *
    * Kept apart from `write` because the two answer to different owners: the
    * user parks a thread, bb decides when it runs, and neither may overwrite
-   * the other's column. A start upserts, so a thread with no parking state
-   * still gets a row; a stop only updates, then deletes a row that has nothing
-   * left in it, so an idle thread never leaves an empty row to be swept.
+   * the other's columns. Timing upserts, so a thread with no parking state
+   * still gets a row — the idle age is read from it. A row left with nothing
+   * in it at all is deleted, so the table never fills with empty rows.
+   *
+   * Publishes only a real change: the startup backfill rewrites every thread,
+   * and a sidebar refetching for values it already holds is pure noise.
    */
-  const markWorking = (threadId: string, startedAt: number | null): void => {
-    if (startedAt === null) {
-      // The stop is also the start of the idle clock: the same statement
-      // clears the run and records when it ended, so the two can never
-      // disagree about the same transition.
-      const updated = db
-        .prepare(
-          `UPDATE thread_lifecycle
-             SET started_working_at = NULL, last_run_ended_at = ?
-             WHERE thread_id = ? AND started_working_at IS NOT NULL`,
-        )
-        .run(Date.now(), threadId);
-      // Nothing was running here as far as this store knows, so there is no
-      // run to have ended. A row invented now would carry an idle age
-      // measured from an event this plugin never saw the other half of.
-      if (updated.changes === 0) return;
-      // The empty-row rule still stands and now has one more column to
-      // consider: a row whose only content is when the last run ended is not
-      // empty — it is the idle clock every card reads.
-      db.prepare(
-        `DELETE FROM thread_lifecycle
-           WHERE thread_id = ?
-             AND settled_at IS NULL
-             AND snoozed_until IS NULL
-             AND snoozed_at IS NULL
-             AND started_working_at IS NULL
-             AND last_run_ended_at IS NULL`,
-      ).run(threadId);
-    } else {
-      db.prepare(
-        `INSERT INTO thread_lifecycle (thread_id, started_working_at)
-           VALUES (?, ?)
-         ON CONFLICT(thread_id) DO UPDATE SET
-           started_working_at = excluded.started_working_at`,
-      ).run(threadId, startedAt);
+  const recordTiming = (threadId: string, timing: TurnTiming): void => {
+    const before = readOne(threadId);
+    if (
+      before !== undefined &&
+      before.startedWorkingAt === timing.startedWorkingAt &&
+      before.lastRunEndedAt === timing.lastRunEndedAt
+    ) {
+      return;
     }
-    // The sidebar reads this store on the same channel as a parking change:
-    // without the signal the elapsed label would only appear on the next
-    // unrelated refresh.
+    if (
+      before === undefined &&
+      timing.startedWorkingAt === null &&
+      timing.lastRunEndedAt === null
+    ) {
+      return;
+    }
+    db.prepare(
+      `INSERT INTO thread_lifecycle
+         (thread_id, started_working_at, last_run_ended_at)
+         VALUES (?, ?, ?)
+       ON CONFLICT(thread_id) DO UPDATE SET
+         started_working_at = excluded.started_working_at,
+         last_run_ended_at = excluded.last_run_ended_at`,
+    ).run(threadId, timing.startedWorkingAt, timing.lastRunEndedAt);
+    db.prepare(
+      `DELETE FROM thread_lifecycle
+         WHERE thread_id = ?
+           AND settled_at IS NULL
+           AND snoozed_until IS NULL
+           AND snoozed_at IS NULL
+           AND started_working_at IS NULL
+           AND last_run_ended_at IS NULL`,
+    ).run(threadId);
     bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId });
+  };
+
+  /**
+   * The newest read per thread. A read writes only while it is still the
+   * newest for its thread, so a slow read — a start waiting for its log row
+   * while the turn already ended — can never overwrite the answer to a later
+   * event. Tokens come from one counter that never repeats, so an entry
+   * dropped when its read finished cannot be mistaken for a later one.
+   */
+  const timingGeneration = new Map<string, number>();
+  let timingTokens = 0;
+
+  const refreshTiming = async (
+    threadId: string,
+    read: (log: TurnEventLog) => Promise<TurnTiming>,
+    context: string,
+  ): Promise<void> => {
+    timingTokens += 1;
+    const generation = timingTokens;
+    timingGeneration.set(threadId, generation);
+    try {
+      const timing = await read(bb.sdk.threads.events);
+      if (timingGeneration.get(threadId) !== generation) return;
+      recordTiming(threadId, timing);
+    } catch (error) {
+      // The cached value stays. It is the last one the log confirmed, and the
+      // next event or startup backfill reads again.
+      bb.log.warn(
+        `turn timing: could not read the event log of ${threadId} on ${context} (${String(error)})`,
+      );
+    } finally {
+      if (timingGeneration.get(threadId) === generation) {
+        timingGeneration.delete(threadId);
+      }
+    }
+  };
+
+  /**
+   * Re-read every live thread's timing from the log.
+   *
+   * Every thread, not only the ones missing a value: a thread that ran while
+   * the plugin was not listening has a cached end that is simply old, and only
+   * the log can say so. Archived threads are skipped — they have no card.
+   */
+  const backfillTiming = async (): Promise<void> => {
+    const threads: Array<{ id: string; status: string }> = [];
+    for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
+      const page = await bb.sdk.threads.list({
+        archived: false,
+        includeHidden: true,
+        limit: BACKFILL_PAGE_SIZE,
+        offset,
+      });
+      threads.push(...page);
+      if (page.length < BACKFILL_PAGE_SIZE) break;
+    }
+    await forEachLimited(threads, BACKFILL_CONCURRENCY, (thread) =>
+      refreshTiming(
+        thread.id,
+        (log) => readTurnTiming(log, thread.id, isRunningStatus(thread.status)),
+        "startup",
+      ),
+    );
+    bb.log.info(`turn timing: read ${threads.length} threads from the event log`);
   };
 
   // Everything about a project's picture, including its own daily sweep and
@@ -809,19 +884,41 @@ export default function plugin(bb: BbPluginApi) {
     clear(thread.id);
   });
 
-  // bb reports the transitions; the clock is read here, once, so every client
-  // measures the same run from the same instant.
-  bb.events.on("thread.active", ({ thread }) => {
-    markWorking(thread.id, Date.now());
-  });
-  bb.events.on("thread.idle", ({ thread }) => {
-    markWorking(thread.id, null);
-  });
-  // A failed run has also stopped: leaving the start behind would show a
-  // timer that counts up forever against work that is no longer happening.
-  bb.events.on("thread.failed", ({ thread }) => {
-    markWorking(thread.id, null);
-  });
+  // bb reports the transitions; the times come from its event log, so every
+  // client and every reload measures the same turn from the same instant.
+  bb.events.on("thread.active", ({ thread }) =>
+    refreshTiming(
+      thread.id,
+      (log) => readStartedTiming(log, thread.id),
+      "thread.active",
+    ),
+  );
+  bb.events.on("thread.idle", ({ thread }) =>
+    refreshTiming(
+      thread.id,
+      (log) => readStoppedTiming(log, thread.id),
+      "thread.idle",
+    ),
+  );
+  // A failed turn has ended too, and bb records its end the same way.
+  bb.events.on("thread.failed", ({ thread }) =>
+    refreshTiming(
+      thread.id,
+      (log) => readStoppedTiming(log, thread.id),
+      "thread.failed",
+    ),
+  );
+
+  // Deferred off the factory, like the avatar sweep: `bb.sdk` is only bound
+  // once the server is listening, and a plugin that blocks its own load on a
+  // read per thread delays every plugin behind it.
+  const initialBackfill = setTimeout(() => {
+    void backfillTiming().catch((error: unknown) => {
+      bb.log.warn(`turn timing: startup backfill failed (${String(error)})`);
+    });
+  }, BACKFILL_DELAY_MS);
+  initialBackfill.unref?.();
+  bb.onDispose(() => clearTimeout(initialBackfill));
 
   const writeState = (key: string, value: string): void => {
     db.prepare(

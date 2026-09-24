@@ -29,15 +29,37 @@ const listProps = {
   searchQuery: "",
 };
 
+/** A lifecycle row that says only when the thread's newest turn ended. */
+function endedRow(threadId: string, lastRunEndedAt: number) {
+  return {
+    threadId,
+    settledAt: null,
+    snoozedUntil: null,
+    snoozedAt: null,
+    startedWorkingAt: null,
+    lastRunEndedAt,
+  };
+}
+
+/** Three hours and a minute ago: comfortably "3h" whatever the clock says. */
+const THREE_HOURS_AGO = () => Date.now() - (3 * 3_600_000 + 60_000);
+
 function render(
   threads: PluginSidebarThread[],
   projects = [sidebarProject("proj_1", "bb")],
+  turnEnds: Record<string, number> = {},
 ) {
   return renderSlot(inbox, listProps, {
     sidebarThreads: { status: "ready", threads, projects },
-    // The lifecycle store is the plugin's own backend; an empty one means
-    // every thread is active, which is what these list tests are about.
-    rpc: { listLifecycle: () => ({ rows: [] }) },
+    // The lifecycle store is the plugin's own backend; one with no parking
+    // state means every thread is active, which is what these list tests are
+    // about. It also carries the idle clock, so a test that reads an age
+    // hands in when the thread's last turn ended.
+    rpc: {
+      listLifecycle: () => ({
+        rows: Object.entries(turnEnds).map(([id, at]) => endedRow(id, at)),
+      }),
+    },
   });
 }
 
@@ -415,12 +437,9 @@ describe("child work", () => {
   // is no child clock anywhere in this sidebar.
   it("keeps the parent's idle age beside that spinner", async () => {
     render(
-      parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }).map(
-        (t) =>
-          t.id === "thr_parent"
-            ? { ...t, updatedAt: Date.now() - (3 * 3_600_000 + MINUTE) }
-            : t,
-      ),
+      parentAndChild({ indicator: "runtime", indicatorLabel: "Working" }),
+      undefined,
+      { thr_parent: THREE_HOURS_AGO() },
     );
     expect(await screen.findByLabelText("Child thread working")).toBeDefined();
     expect(screen.getByText("3h")).toBeDefined();
@@ -844,11 +863,17 @@ describe("card metadata", () => {
 
   // Not exactly 3h: the card's clock is quantized to the minute, so a
   // timestamp sitting on a bucket boundary legitimately reads one unit lower.
-  it("shows how long ago the thread was touched", async () => {
-    render([
-      thread({ id: "thr_t", updatedAt: Date.now() - (3 * 3_600_000 + 60_000) }),
-    ]);
+  it("shows how long ago the thread's last turn ended", async () => {
+    render([thread({ id: "thr_t" })], undefined, { thr_t: THREE_HOURS_AGO() });
     expect(await screen.findByText("3h")).toBeDefined();
+  });
+
+  // No turn has ended, so there is no cache window to measure. bb's updatedAt
+  // would put a number here, and it would be the wrong one.
+  it("shows no age for a thread whose turn has never ended", async () => {
+    render([thread({ id: "thr_new", updatedAt: THREE_HOURS_AGO() })]);
+    expect(await screen.findByRole("link")).toBeDefined();
+    expect(screen.queryByText("3h")).toBeNull();
   });
 
   // The one row that spends the slot on a glyph alone: its own run is live, so
@@ -869,13 +894,16 @@ describe("card metadata", () => {
   // An indicator this plugin does not know must fall through to the age label
   // rather than leave the slot blank.
   it("keeps the age label for an unrecognized indicator", async () => {
-    render([
-      thread({
-        id: "thr_new",
-        indicator: "something-bb-ships-later" as never,
-        updatedAt: Date.now() - (3 * 3_600_000 + 60_000),
-      }),
-    ]);
+    render(
+      [
+        thread({
+          id: "thr_new",
+          indicator: "something-bb-ships-later" as never,
+        }),
+      ],
+      undefined,
+      { thr_new: THREE_HOURS_AGO() },
+    );
     expect(await screen.findByText("3h")).toBeDefined();
   });
 });
@@ -897,14 +925,17 @@ describe("attention states", () => {
     // how long it has been in it, and on an idle thread that second number is
     // what decides whether replying resumes a cached conversation.
     it(`shows the ${indicator} glyph beside the age`, async () => {
-      render([
-        thread({
-          id: `thr_${indicator}`,
-          indicator,
-          indicatorLabel: label,
-          updatedAt: Date.now() - (3 * 3_600_000 + 60_000),
-        }),
-      ]);
+      render(
+        [
+          thread({
+            id: `thr_${indicator}`,
+            indicator,
+            indicatorLabel: label,
+          }),
+        ],
+        undefined,
+        { [`thr_${indicator}`]: THREE_HOURS_AGO() },
+      );
       expect(await screen.findByLabelText(label)).toBeDefined();
       expect(screen.getByText("3h")).toBeDefined();
     });

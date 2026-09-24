@@ -70,13 +70,14 @@ export interface LifecycleApi {
   canPark(thread: PluginSidebarThread): boolean;
   wakeAtFor(thread: PluginSidebarThread): number | null;
   /**
-   * When the thread's current run started, as bb recorded it, or null when it
-   * is not running or the store has never seen it run.
+   * When the turn in flight started, as bb's event log recorded it, or null
+   * when no turn is running.
    */
   startedWorkingAtFor(threadId: string): number | null;
   /**
-   * When the thread's own last run ended, or null when this plugin has never
-   * seen one end. The caller falls back to bb's `updatedAt`.
+   * When the thread's newest turn ended, as bb's event log recorded it, or
+   * null when no turn ever has. There is no fallback: any other clock would
+   * misstate what is left of the prompt-cache window.
    */
   lastRunEndedAtFor(threadId: string): number | null;
   /** Live work on the thread or on any of its direct children. */

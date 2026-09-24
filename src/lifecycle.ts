@@ -15,15 +15,14 @@ export interface ThreadLifecycleRow {
   /** When the snooze was set — used to detect activity since. */
   snoozedAt: number | null;
   /**
-   * When bb last reported this thread starting work; null when it is not
-   * running. Written by the backend from bb's thread events, never by the UI:
-   * a browser-side timer would restart on every remount.
+   * When the turn in flight started, from bb's event log; null when no turn is
+   * running. Written by the backend, never by the UI: a browser-side timer
+   * would restart on every remount.
    */
   startedWorkingAt: number | null;
   /**
-   * When the thread's own last run ended, or null until it has finished one
-   * under this plugin. The card's idle age is measured from here; bb's
-   * `updatedAt` is only the fallback.
+   * When the thread's newest turn ended, from bb's event log; null when no
+   * turn ever has. The card's idle age is measured from here and nothing else.
    */
   lastRunEndedAt: number | null;
 }
