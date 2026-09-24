@@ -12,6 +12,8 @@ const toasts = vi.hoisted(() => {
 vi.mock("sonner", () => toasts);
 
 const app = await loadPluginApp(() => import("../app"));
+// After the harness, so the module binds to the test runtime.
+const { busyThreadIds } = await import("./useLifecycle");
 const inbox = app.threadLists[0]!;
 
 const listProps = {
@@ -90,6 +92,33 @@ describe("lifecycle sync", () => {
     });
 
     await waitFor(() => expect(listCalls(rendered)).toHaveLength(2));
+  });
+
+  // A read that just failed will most likely fail again; a gap waits for the
+  // user's Retry instead of firing one read per message.
+  it("does not re-read on a gap while the last read has failed", async () => {
+    let reads = 0;
+    const rendered = renderInbox({
+      listLifecycle: () => {
+        reads += 1;
+        if (reads > 1) throw new Error("backend down");
+        return { epoch: "e1", seq: 3, rows: [] };
+      },
+    });
+    await screen.findByText("Alpha");
+    const gap = (seq: number) =>
+      rendered.emitRealtime("lifecycle", {
+        kind: "row",
+        epoch: "e1",
+        seq,
+        threadId: "thr_a",
+        row: null,
+      });
+    await gap(9);
+    await screen.findByText(/may be out of date/);
+    await gap(12);
+    await gap(15);
+    expect(listCalls(rendered)).toHaveLength(2);
   });
 
   // Messages sent while the connection was down are lost; only a full read
@@ -227,5 +256,27 @@ describe("optimistic parking", () => {
     });
 
     expect(toasts.toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("busyThreadIds", () => {
+  // A grandchild working under a quiet child keeps the whole chain busy, so
+  // the grandparent cannot be shelved while work runs somewhere below it.
+  it("marks every ancestor of a working thread", () => {
+    const busy = busyThreadIds([
+      sidebarThread({ id: "root" }),
+      sidebarThread({ id: "mid", parentThreadId: "root" }),
+      sidebarThread({ id: "leaf", parentThreadId: "mid", status: "active" }),
+      sidebarThread({ id: "other" }),
+    ]);
+    expect([...busy].sort()).toEqual(["leaf", "mid", "root"]);
+  });
+
+  it("survives a parent chain that loops", () => {
+    const busy = busyThreadIds([
+      sidebarThread({ id: "a", parentThreadId: "b", status: "active" }),
+      sidebarThread({ id: "b", parentThreadId: "a" }),
+    ]);
+    expect([...busy].sort()).toEqual(["a", "b"]);
   });
 });

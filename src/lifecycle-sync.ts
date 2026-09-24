@@ -9,9 +9,11 @@
  * again. Deltas are the common path; the full read is the recovery, never the
  * routine.
  *
- * No server or node imports here: the frontend bundles this module.
+ * No server or node imports here beyond types: the frontend bundles this
+ * module, and a type import is erased before it does.
  */
 import type { ThreadLifecycleRow } from "./lifecycle";
+import type { ReapSummary } from "./server";
 
 /** Channel the lifecycle store publishes on. */
 export const LIFECYCLE_CHANNEL = "lifecycle";
@@ -26,21 +28,11 @@ export interface LifecycleRowMessage {
   row: ThreadLifecycleRow | null;
 }
 
-/** The mirror of the server's reap report, as the client reads it. */
-export interface ReapedSummary {
-  enabled: boolean;
-  terminalsClosed: Array<{ terminalId: string; title: string }>;
-  terminalsFailed: number;
-  processesKilled: Array<{ pid: number; command: string }>;
-  processesFailed: number;
-  worktreesSkipped: Array<{ path: string; reason: "in-use" | "unreachable" }>;
-}
-
 /** What a settle's reap did, published once it finished. */
 export interface LifecycleReapedMessage {
   kind: "reaped";
   threadId: string;
-  reaped: ReapedSummary;
+  reaped: ReapSummary;
 }
 
 export type LifecycleMessage = LifecycleRowMessage | LifecycleReapedMessage;
@@ -232,7 +224,7 @@ export function sameRow(
  * the user needs to hear. Stopping a dev server is a visible act; so is
  * leaving one running that the user expected stopped.
  */
-export function describeReap(reaped: ReapedSummary): {
+export function describeReap(reaped: ReapSummary): {
   tone: "info" | "warning";
   title: string;
   description: string | null;
@@ -247,11 +239,16 @@ export function describeReap(reaped: ReapedSummary): {
     ...reaped.processesKilled.map((process) => process.command),
   ];
   const notes = [
-    ...skipped.map((worktree) =>
-      worktree.reason === "in-use"
-        ? `Left running in ${worktree.path}: another thread is mid-turn there.`
-        : `Nothing stopped in ${worktree.path}: its machine could not be reached.`,
-    ),
+    ...skipped.map((worktree) => {
+      switch (worktree.reason) {
+        case "in-use":
+          return `Left running in ${worktree.path}: another thread is mid-turn there.`;
+        case "timed-out":
+          return `Timed out sweeping ${worktree.path}; some processes may have stopped.`;
+        default:
+          return `Nothing stopped in ${worktree.path}: its machine could not be reached.`;
+      }
+    }),
     ...(failed > 0 ? [`${failed} could not be stopped; see the plugin log.`] : []),
   ];
   const title =

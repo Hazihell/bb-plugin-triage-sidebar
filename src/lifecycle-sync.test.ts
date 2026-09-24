@@ -8,8 +8,8 @@ import {
   stateFromSnapshot,
   stateFromSnapshotAndBuffer,
   type LifecycleRowMessage,
-  type ReapedSummary,
 } from "./lifecycle-sync";
+import type { ReapSummary } from "./server";
 
 const settledRow = (threadId: string, settledAt = 100) => ({
   ...blankRow(threadId),
@@ -110,7 +110,7 @@ describe("parseLifecycleMessage", () => {
   });
 });
 
-const reaped = (overrides: Partial<ReapedSummary> = {}): ReapedSummary => ({
+const reaped = (overrides: Partial<ReapSummary> = {}): ReapSummary => ({
   enabled: true,
   terminalsClosed: [],
   terminalsFailed: 0,
@@ -146,5 +146,15 @@ describe("describeReap", () => {
     );
     expect(report?.tone).toBe("warning");
     expect(report?.description).toContain("could not be reached");
+  });
+
+  it("says a timed-out sweep may have stopped some processes", () => {
+    const report = describeReap(
+      reaped({ worktreesSkipped: [{ path: "/w/app", reason: "timed-out" }] }),
+    );
+    expect(report?.tone).toBe("warning");
+    expect(report?.description).toBe(
+      "Timed out sweeping /w/app; some processes may have stopped.",
+    );
   });
 });

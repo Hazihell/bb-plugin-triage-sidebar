@@ -7,7 +7,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
 import type { triageSidebarRpcContract } from "./server";
-import { childrenOf } from "./inbox";
 import { isRecord, readSnapshot, writeSnapshot } from "./local-snapshot";
 import {
   applyRowMessage,
@@ -87,31 +86,30 @@ export function isWorking(thread: PluginSidebarThread): boolean {
  * archivable by the sweep. Folding a child's work into the parent is what
  * makes the flat list honest about a tree it deliberately does not show.
  *
- * Direct children only. A grandchild's work already marks its own parent
- * busy, and that parent is a child of this one, so depth arrives on its own
- * for any tree the sidebar can see.
+ * Every ancestor, not just the parent: a grandchild working under a quiet
+ * child must keep the grandparent off the shelves too, even when the quiet
+ * child is itself hidden or archived. The walk keeps a visited set, so a
+ * malformed parent chain cannot loop.
  *
  * One pass over the list rather than a lookup per card: the sort asks this of
- * every row, and `childrenOf` is a scan.
+ * every row.
  */
 export function busyThreadIds(
   threads: readonly PluginSidebarThread[],
 ): ReadonlySet<string> {
+  const parentOf = new Map(
+    threads.map((thread) => [thread.id, thread.parentThreadId]),
+  );
   const busy = new Set<string>();
   for (const thread of threads) {
     if (!isWorking(thread)) continue;
-    busy.add(thread.id);
-    if (thread.parentThreadId !== null) busy.add(thread.parentThreadId);
+    let id: string | null | undefined = thread.id;
+    while (id != null && !busy.has(id)) {
+      busy.add(id);
+      id = parentOf.get(id);
+    }
   }
   return busy;
-}
-
-/** Whether one thread is busy, for a caller that has no list to scan. */
-export function isBusy(
-  thread: PluginSidebarThread,
-  threads: readonly PluginSidebarThread[],
-): boolean {
-  return isWorking(thread) || childrenOf(threads, thread.id).some(isWorking);
 }
 
 export type LifecycleLoadStatus = "loading" | "ready" | "error";
@@ -211,6 +209,10 @@ export function useLifecycle(
   const buffer = useRef<LifecycleRowMessage[] | null>(null);
   // Only the newest read may write; an older one can land after it.
   const readSeq = useRef(0);
+  // The last full read failed. A gap in the messages then waits for the
+  // user's Retry or a reconnect instead of firing another read that will
+  // most likely fail the same way.
+  const readFailed = useRef(false);
 
   const resync = useCallback(async (): Promise<void> => {
     const id = ++readSeq.current;
@@ -223,6 +225,7 @@ export function useLifecycle(
       buffer.current = null;
       // Shown by the list itself, with a Retry, rather than toasted: a toast
       // fades while the list goes on being wrong.
+      readFailed.current = true;
       setError(errorMessage(failure));
       setStatus("error");
       return;
@@ -232,11 +235,12 @@ export function useLifecycle(
     buffer.current = null;
     const { state, stale } = stateFromSnapshotAndBuffer(snapshot, buffered);
     commit(state);
+    readFailed.current = false;
     setError(null);
     setStatus("ready");
     setSource("live");
     // A gap among the buffered messages: one was lost in flight.
-    if (stale) void resync();
+    if (stale && !readFailed.current) void resync();
   }, [commit, rpc]);
 
   useEffect(() => {
@@ -271,7 +275,7 @@ export function useLifecycle(
     if (current === null) return;
     const { state, stale } = applyRowMessage(current, message);
     commit(state);
-    if (stale) void resync();
+    if (stale && !readFailed.current) void resync();
   });
 
   // Messages sent while the connection was down are gone for good, so a

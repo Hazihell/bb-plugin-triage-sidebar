@@ -753,6 +753,10 @@ export default function plugin(bb: BbPluginApi) {
     }
   };
 
+  /** A thread's status as bb reports it now, for a read that needs it. */
+  const readStatus = (threadId: string) => async (): Promise<string> =>
+    (await bb.sdk.threads.get({ threadId })).status;
+
   /**
    * Re-read every live thread's timing from the log.
    *
@@ -760,10 +764,6 @@ export default function plugin(bb: BbPluginApi) {
    * the plugin was not listening has a cached end that is simply old, and only
    * the log can say so. Archived threads are skipped — they have no card.
    */
-  /** A thread's status as bb reports it now, for a read that needs it. */
-  const readStatus = (threadId: string) => async (): Promise<string> =>
-    (await bb.sdk.threads.get({ threadId })).status;
-
   const backfillTiming = async (): Promise<void> => {
     const threads = await listLiveThreads();
     await forEachLimited(threads, BACKFILL_CONCURRENCY, (thread) =>
@@ -1218,27 +1218,6 @@ export default function plugin(bb: BbPluginApi) {
   };
 
   /**
-   * The periodic sweep: settled threads the user has not come back to
-   * eventually leave the sidebar for the archive.
-   *
-   * Settling is a judgement the user already made, and the shelf keeps it
-   * reversible until this point. The sweep only finishes that decision — it
-   * never makes one, which is why anything still alive is skipped rather than
-   * archived, and why the row is only cleared once the archive succeeded.
-   */
-  /**
-   * One sweep, shared by the schedule and the Settings button.
-   *
-   * It returns its tally instead of only logging it, because the manual run
-   * has a user waiting on an answer: "archived nothing" is the ordinary
-   * outcome here, and without the counts it is indistinguishable from a sweep
-   * that is quietly broken.
-   *
-   * The manual path deliberately gets no override of its own. The switch and
-   * the retention period are the user's standing decision, and a button that
-   * ignored them would archive threads the settings promise are safe.
-   */
-  /**
    * What the sweep should do with one settled candidate, judged from one read
    * of bb's threads.
    *
@@ -1286,6 +1265,26 @@ export default function plugin(bb: BbPluginApi) {
   const unsettleStale = (threadId: string): void =>
     writeParking(threadId, { settledAt: null, snoozedUntil: null, snoozedAt: null });
 
+  /**
+   * The periodic sweep: settled threads the user has not come back to
+   * eventually leave the sidebar for the archive.
+   *
+   * Settling is a judgement the user already made, and the shelf keeps it
+   * reversible until this point. The sweep only finishes that decision — it
+   * never makes one, which is why anything still alive is skipped rather than
+   * archived, and why the row is only cleared once the archive succeeded.
+   *
+   * One sweep, shared by the schedule and the Settings button.
+   *
+   * It returns its tally instead of only logging it, because the manual run
+   * has a user waiting on an answer: "archived nothing" is the ordinary
+   * outcome here, and without the counts it is indistinguishable from a sweep
+   * that is quietly broken.
+   *
+   * The manual path deliberately gets no override of its own. The switch and
+   * the retention period are the user's standing decision, and a button that
+   * ignored them would archive threads the settings promise are safe.
+   */
   const runAutoArchiveSweep = async (): Promise<AutoArchiveSweepResult> => {
     // Read fresh rather than closing over a load-time snapshot: the user can
     // turn this off between two runs of the schedule.
