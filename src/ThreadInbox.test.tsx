@@ -337,7 +337,42 @@ describe("parking threads", () => {
     // Rendered (not merely accepted as props): a card whose park controls
     // never mount leaves the whole feature unreachable.
     expect(await screen.findByLabelText("Settle thread")).toBeDefined();
-    expect(screen.getByLabelText("Snooze until tomorrow")).toBeDefined();
+    expect(screen.getByLabelText("Snooze")).toBeDefined();
+  });
+
+  // One preset is the wrong answer half the day; the strip offers them all.
+  it("snoozes to the preset the user picks from the strip", async () => {
+    let snoozedUntil: number | null = null;
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_park", title: "Quiet" })],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [] }),
+        snooze: (input) => {
+          snoozedUntil = (input as { snoozedUntil: number }).snoozedUntil;
+          return { ok: true };
+        },
+      },
+    });
+    fireEvent.keyDown(await screen.findByLabelText("Snooze"), { key: "Enter" });
+    const menu = await screen.findByRole("menu", { name: "Snooze" });
+    const presets = resolveSnoozePresets(new Date());
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(presets.map((preset) => preset.label));
+    // Portaled out of the list, but still inside the plugin's style scope.
+    expect(menu.closest("[data-bb-plugin-root]")).not.toBeNull();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Next week" }));
+    await waitFor(() =>
+      expect(snoozedUntil).toBe(
+        presets.find((preset) => preset.id === "next-week")!.snoozedUntil,
+      ),
+    );
   });
 
   it("settles a thread when the user clicks Settle", async () => {
@@ -651,6 +686,7 @@ describe("row context menu", () => {
     const row = await screen.findByText("Right click me");
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    expect(menu.closest("[data-bb-plugin-root]")).not.toBeNull();
     // The plugin builds this menu itself — the SDK ships no menu component —
     // so the items are this plugin's choice, backed by the action hook.
     expect(
@@ -1517,5 +1553,48 @@ describe("first paint", () => {
       );
       expect(saved?.rows).toEqual([endedRow("thr_open", 42)]);
     });
+  });
+});
+
+describe("menus hold the order", () => {
+  it("keeps the row in place while its context menu is open", async () => {
+    const snoozedRow = {
+      threadId: "thr_top",
+      settledAt: null,
+      snoozedUntil: Date.now() + 3_600_000,
+      snoozedAt: Date.now() - 1_000,
+      startedWorkingAt: null,
+      lastRunEndedAt: null,
+    };
+    const rendered = renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [
+          thread({ id: "thr_mid", title: "Middle", latestAttentionAt: 200 }),
+          thread({ id: "thr_top", title: "Topmost", latestAttentionAt: 300 }),
+        ],
+        projects: [sidebarProject("proj_1", "bb")],
+      },
+      rpc: {
+        listLifecycle: () => ({ epoch: "test", seq: 0, rows: [snoozedRow] }),
+      },
+    });
+    fireEvent.contextMenu(await screen.findByText("Middle"));
+    await screen.findByRole("menu", { name: "Thread actions" });
+    await rendered.emitRealtime("lifecycle", {
+      kind: "row",
+      epoch: "test",
+      seq: 1,
+      threadId: "thr_top",
+      row: null,
+    });
+    // The open menu hides the rest of the page from assistive tech.
+    const firstRow = () =>
+      screen.getAllByRole("listitem", { hidden: true })[0]!.textContent;
+    expect(firstRow()).toContain("Middle");
+    fireEvent.keyDown(screen.getByRole("menu", { name: "Thread actions" }), {
+      key: "Escape",
+    });
+    await waitFor(() => expect(firstRow()).toContain("Topmost"));
   });
 });

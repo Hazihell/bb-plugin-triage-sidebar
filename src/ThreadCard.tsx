@@ -5,7 +5,15 @@ import {
   useSidebarThreadShortcut,
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
+import { useState } from "react";
 import { Icon, type IconName } from "./components/Icon";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./components/DropdownMenu";
+import { useHoldOrderWhile } from "./useOrderFreeze";
 import { ProjectAvatar } from "./ProjectAvatar";
 import type { StoredProjectAvatar } from "./project-avatar";
 import { cn } from "./lib/utils";
@@ -128,22 +136,7 @@ export function ThreadCard({
             {shortcut !== null ? (
               <ShortcutPill shortcut={shortcut} />
             ) : park.canPark ? (
-              <span className="pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex group-has-[:focus-visible]/card:flex">
-                <ParkButton
-                  label="Snooze until tomorrow"
-                  icon="Clock"
-                  onActivate={() =>
-                    park.onSnooze(
-                      resolveSnoozePresets(new Date())[2]!.snoozedUntil,
-                    )
-                  }
-                />
-                <ParkButton
-                  label="Settle thread"
-                  icon="Check"
-                  onActivate={park.onSettle}
-                />
-              </span>
+              <ParkStrip park={park} />
             ) : null}
             <span className={STATUS_SLOT_CLASS}>
               <StatusOrTime
@@ -250,30 +243,66 @@ export function ThreadCard({
   );
 }
 
-function ParkButton({
-  label,
-  icon,
-  onActivate,
-}: {
-  label: string;
-  icon: Extract<IconName, "Clock" | "Check">;
-  onActivate: () => void;
-}) {
+/**
+ * Settle and snooze, beside the status slot on hover or keyboard focus.
+ *
+ * Snooze opens the same presets as the right-click menu rather than picking
+ * one: "tomorrow" is the wrong answer at 10am, and a second click is cheaper
+ * than a wrong wake-up. While that menu is open the strip stays drawn, so the
+ * menu keeps its anchor when the pointer leaves the card for it, and the
+ * list's order holds, so the row it belongs to does not move away.
+ */
+function ParkStrip({ park }: { park: ParkMenuActions }) {
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  useHoldOrderWhile(snoozeOpen);
   return (
-    <button
-      type="button"
-      aria-label={label}
-      onClick={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onActivate();
-      }}
-      className="cursor-pointer rounded p-0.5 text-muted-foreground hover:text-foreground"
+    <span
+      className={cn(
+        "pointer-events-auto hidden items-center gap-0.5 group-hover/card:flex group-has-[:focus-visible]/card:flex",
+        snoozeOpen && "flex",
+      )}
     >
-      <Icon name={icon} className="size-3.5" />
-    </button>
+      <DropdownMenu open={snoozeOpen} onOpenChange={setSnoozeOpen}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Snooze"
+            onClick={(event) => event.stopPropagation()}
+            className={cn(PARK_BUTTON_CLASS, snoozeOpen && "text-foreground")}
+          >
+            <Icon name="Clock" className="size-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {/* Resolved on open: "This evening" drops out after 5pm. */}
+          {resolveSnoozePresets(new Date()).map((preset) => (
+            <DropdownMenuItem
+              key={preset.id}
+              onSelect={() => park.onSnooze(preset.snoozedUntil)}
+            >
+              {preset.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <button
+        type="button"
+        aria-label="Settle thread"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          park.onSettle();
+        }}
+        className={PARK_BUTTON_CLASS}
+      >
+        <Icon name="Check" className="size-3.5" />
+      </button>
+    </span>
   );
 }
+
+const PARK_BUTTON_CLASS =
+  "cursor-pointer rounded p-0.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring";
 
 function ActivityCount({
   label,

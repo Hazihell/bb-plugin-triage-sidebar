@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   experimental_useSidebarThreadActions as useSidebarThreadActions,
   experimental_useSidebarThreads as useSidebarThreads,
@@ -9,6 +8,13 @@ import { cn } from "./lib/utils";
 import { Disc } from "./Disc";
 import { StatusGlyph } from "./StatusGlyph";
 import { childrenOf } from "./inbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "./components/DropdownMenu";
 
 const MAX_DISCS = 3;
 
@@ -19,6 +25,11 @@ const MAX_DISCS = 3;
  * These are bb CHILD THREADS — forks, side chats, and plugin-spawned threads.
  * bb's in-turn subagents are activity counters on the parent, not threads, so
  * the label deliberately says "children".
+ *
+ * A real menu, portaled out of the header with the plugin's style scope, so
+ * it is never clipped by the header, flips to stay on screen, closes on
+ * Escape and outside click, and moves between children with the arrow keys
+ * and type-ahead — none of which a hand-rolled absolute panel did.
  */
 export function SubagentsChip({
   threadId,
@@ -26,7 +37,6 @@ export function SubagentsChip({
 }: PluginThreadHeaderActionProps) {
   const { threads } = useSidebarThreads();
   const actions = useSidebarThreadActions();
-  const [open, setOpen] = useState(false);
 
   const children = childrenOf(threads, threadId);
   if (children.length === 0) return null;
@@ -35,74 +45,55 @@ export function SubagentsChip({
   const label = needsYou ? "Needs you" : `${children.length} children`;
 
   return (
-    <span className="relative">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-label={`${children.length} child threads`}
-        onClick={() => setOpen((value) => !value)}
-        className={cn(
-          "flex h-7 items-center gap-1.5 rounded-full border border-border px-2 text-2xs text-muted-foreground",
-          "hover:bg-accent hover:text-foreground",
-          open && "bg-accent text-foreground",
-        )}
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`${children.length} child threads`}
+          className={cn(
+            "flex h-7 items-center gap-1.5 rounded-full border border-border px-2 text-2xs text-muted-foreground outline-none",
+            "hover:bg-state-hover hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring",
+            "data-[state=open]:bg-state-active data-[state=open]:text-foreground",
+          )}
+        >
+          <DiscCluster threads={children} />
+          {isCompactViewport ? null : <span className="truncate">{label}</span>}
+        </button>
+      </DropdownMenuTrigger>
+      {/* Named by its trigger: Radix labels the menu with the button that
+          opened it, and that label wins over any aria-label here. */}
+      <DropdownMenuContent
+        align="end"
+        className="w-80 max-w-[calc(100vw-1rem)]"
       >
-        <DiscCluster threads={children} />
-        {isCompactViewport ? null : <span className="truncate">{label}</span>}
-      </button>
-      {open ? (
-        <>
-          {/* Click-away. The header is a short row, so the list itself is
-              absolutely positioned rather than inline. */}
-          <span
-            className="fixed inset-0 z-40"
-            onClick={() => setOpen(false)}
-            aria-hidden
-          />
-          <div
-            role="menu"
-            aria-label="Child threads"
-            className="absolute right-0 top-9 z-50 w-80 overflow-hidden rounded-xl border border-border bg-popover shadow-lg"
+        <DropdownMenuLabel className="flex items-center gap-2">
+          <span className="font-semibold text-foreground">Children</span>
+          <span className="ml-auto text-2xs font-normal">
+            {children.length}
+          </span>
+        </DropdownMenuLabel>
+        {children.map((child) => (
+          <DropdownMenuItem
+            key={child.id}
+            textValue={child.displayTitle}
+            onSelect={() => actions.open(child.id)}
+            className="py-1.5"
           >
-            <div className="flex items-center gap-2 px-3 pb-1 pt-2.5">
-              <span className="text-xs font-semibold">Children</span>
-              <span className="ml-auto text-2xs text-muted-foreground">
-                {children.length}
+            <Disc thread={child} />
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-xs">{child.displayTitle}</span>
+              <span className="truncate text-2xs text-muted-foreground">
+                {child.originKind ?? "thread"}
               </span>
-            </div>
-            <ul className="flex flex-col gap-px p-1.5 pt-0.5">
-              {children.map((child) => (
-                <li key={child.id} className="list-none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setOpen(false);
-                      actions.open(child.id);
-                    }}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent"
-                  >
-                    <Disc thread={child} />
-                    <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-xs">
-                        {child.displayTitle}
-                      </span>
-                      <span className="truncate text-2xs text-muted-foreground">
-                        {child.originKind ?? "thread"}
-                      </span>
-                    </span>
-                    <StatusGlyph
-                      indicator={child.indicator}
-                      label={child.indicatorLabel}
-                    />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </>
-      ) : null}
-    </span>
+            </span>
+            <StatusGlyph
+              indicator={child.indicator}
+              label={child.indicatorLabel}
+            />
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

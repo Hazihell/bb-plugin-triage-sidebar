@@ -8,6 +8,7 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { isLastInputKeyboard } from "./lib/input-modality";
 
 /** How long the order stays held after the last reason to hold it ends. */
 const RELEASE_GRACE_MS = 200;
@@ -153,7 +154,7 @@ export function useOrderFreeze(containerRef: RefObject<HTMLElement | null>): {
 /**
  * Focus the user can see: the engine's own verdict, or, where the engine has
  * none to give, whether the last input was a key rather than a pointer, which
- * is the rule `:focus-visible` itself follows and what bb's overlays use.
+ * is the rule `:focus-visible` itself follows.
  */
 function isFocusVisible(element: HTMLElement): boolean {
   try {
@@ -161,23 +162,5 @@ function isFocusVisible(element: HTMLElement): boolean {
   } catch {
     // An engine without the selector falls through to the input modality.
   }
-  return lastInputWasKeyboard;
-}
-
-let lastInputWasKeyboard = false;
-if (typeof document !== "undefined") {
-  document.addEventListener(
-    "keydown",
-    () => {
-      lastInputWasKeyboard = true;
-    },
-    { capture: true },
-  );
-  document.addEventListener(
-    "pointerdown",
-    () => {
-      lastInputWasKeyboard = false;
-    },
-    { capture: true },
-  );
+  return isLastInputKeyboard();
 }
