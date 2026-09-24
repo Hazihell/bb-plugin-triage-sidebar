@@ -397,10 +397,10 @@ describe("parking threads", () => {
   });
 
   it("shows the wake countdown on a snoozed row", async () => {
-    // Anchored to the minute the list's clock is quantized to, so the
-    // countdown's rounding cannot tip it into the next hour.
-    const wakeAt =
-      Math.floor(Date.now() / 60_000) * 60_000 + 2 * 60 * 60 * 1000;
+    // Just under two hours, as a fresh two-hour snooze is a moment later.
+    // The list's clock is floored to the minute; read from it, this would
+    // round up to "3h".
+    const wakeAt = Date.now() + 2 * 60 * 60 * 1000 - 5_000;
     renderSlot(inbox, listProps, {
       sidebarThreads: {
         status: "ready",

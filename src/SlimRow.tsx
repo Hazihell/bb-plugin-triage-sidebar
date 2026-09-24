@@ -48,6 +48,13 @@ export function SlimRow({
 }) {
   const split = useSidebarThreadSplit(thread.id);
   const shortcut = useSidebarThreadShortcut(thread.id);
+  // A countdown rounds UP, so it reads the real time rather than the list's
+  // clock, which is floored to the minute: floored, a snooze of one hour
+  // would read "2h" for its first minute.
+  const wakeLabel =
+    shelf === "snoozed" && wakeAt !== null
+      ? snoozeWakeLabel(wakeAt, Math.max(now, Date.now()))
+      : null;
 
   return (
     <RowContextMenu thread={thread} park={park}>
@@ -81,13 +88,13 @@ export function SlimRow({
             <ShortcutPill shortcut={shortcut} />
           ) : (
             <span className="relative flex shrink-0 items-center">
-              {shelf === "snoozed" && wakeAt !== null ? (
+              {wakeLabel !== null ? (
                 <span
-                  aria-label={`Wakes in ${snoozeWakeLabel(wakeAt, now)}`}
+                  aria-label={`Wakes in ${wakeLabel}`}
                   className="pointer-events-none flex items-center gap-0.5 text-2xs tabular-nums text-muted-foreground/60 group-hover/slim:hidden group-has-[:focus-visible]/slim:hidden"
                 >
                   <Icon name="Clock" className="size-3" aria-hidden />
-                  {snoozeWakeLabel(wakeAt, now)}
+                  {wakeLabel}
                 </span>
               ) : null}
               <button
