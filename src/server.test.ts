@@ -18,6 +18,7 @@ import plugin, {
   nextAutoArchiveRunAt,
   BACKFILL_DELAY_MS,
   type AutoArchiveSweepResult,
+  type ReapSummary,
   type StoredAvatarRow,
   type StoredLifecycleRow,
 } from "./server";
@@ -39,12 +40,22 @@ const listRows = async (host: FakePluginHost): Promise<StoredLifecycleRow[]> =>
     rows: StoredLifecycleRow[];
   }).rows;
 
+/**
+ * Lets work the plugin started without awaiting — a settle's reap, an event
+ * handler waiting on the fake log — run to its next real wait. The fakes
+ * answer synchronously, so one macrotask drains every promise they queued.
+ */
+const flushTasks = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 /** A thread that has been settled long enough for any sane retention period. */
 async function settleLongAgo(
   host: FakePluginHost,
   threadId: string,
 ): Promise<void> {
   await host.harness.behavior.callRpc("settle", { threadId });
+  // The settle's reap runs after it returns; let it finish so its calls are
+  // not mistaken for the sweep's.
+  await flushTasks();
   host.bb.storage
     .database()
     .prepare(`UPDATE thread_lifecycle SET settled_at = ? WHERE thread_id = ?`)
@@ -155,8 +166,6 @@ function eventLog(initial: Record<string, LogRow[]> = {}) {
   };
 }
 
-/** Lets handlers that awaited the fake log finish their writes. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("turn timing", () => {
   const T = 1_790_000_000_000;
@@ -173,7 +182,7 @@ describe("turn timing", () => {
     await host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
-    await settle();
+    await flushTasks();
 
     const [row] = await listRows(host);
     expect(row?.startedWorkingAt).toBe(T + 60_000);
@@ -201,7 +210,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
       lastAssistantText: null,
     });
-    await settle();
+    await flushTasks();
 
     const [row] = await listRows(host);
     expect(row?.startedWorkingAt).toBeNull();
@@ -223,7 +232,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_run", status: "idle" }),
       lastAssistantText: null,
     });
-    await settle();
+    await flushTasks();
     expect(await listRows(host)).toEqual([]);
 
     log.push("thr_run", { seq: 3, createdAt: T + 20_000, type: "turn/completed" });
@@ -240,7 +249,7 @@ describe("turn timing", () => {
     const handled = host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
-    await settle();
+    await flushTasks();
     expect(await listRows(host)).toEqual([]);
 
     log.push("thr_run", { seq: 2, createdAt: T + 7_000, type: "turn/started" });
@@ -259,7 +268,7 @@ describe("turn timing", () => {
     const started = host.harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: "thr_run", status: "active" }),
     });
-    await settle();
+    await flushTasks();
     // The turn was so short that it started and ended before the start's
     // wait returned, and the idle event was handled first.
     log.push("thr_run", { seq: 2, createdAt: T + 1_000, type: "turn/started" }, true);
@@ -290,7 +299,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_boom", status: "error" }),
       error: "boom",
     });
-    await settle();
+    await flushTasks();
 
     expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T + 3_000);
   });
@@ -319,7 +328,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_x", status: "idle" }),
       lastAssistantText: null,
     });
-    await settle();
+    await flushTasks();
 
     expect((await listRows(host))[0]?.lastRunEndedAt).toBe(T);
   });
@@ -350,7 +359,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_park", status: "idle" }),
       lastAssistantText: null,
     });
-    await settle();
+    await flushTasks();
 
     await host.harness.behavior.callRpc("settle", { threadId: "thr_park" });
 
@@ -370,7 +379,7 @@ describe("turn timing", () => {
       thread: makeThreadResponse({ id: "thr_parked", status: "error" }),
       error: "boom",
     });
-    await settle();
+    await flushTasks();
 
     const [row] = await listRows(host);
     expect(row?.settledAt).not.toBeNull();
@@ -1850,12 +1859,35 @@ describe("local favicon scan", () => {
 });
 
 describe("reaping on settle", () => {
-  const reaping = (): CreateFakePluginHostOptions["sdk"] => ({
+  const WORKTREE = "/Users/x/.bb/worktrees/env_wt/app";
+
+  const environments: Record<string, Record<string, unknown>> = {
+    env_wt: { id: "env_wt", hostId: "host_remote", path: WORKTREE, isWorktree: true },
+    env_main: { id: "env_main", hostId: "host_local", path: "/Users/x/app", isWorktree: false },
+  };
+
+  const reaping = (
+    overrides: {
+      environmentId?: string | null;
+      environmentThreads?: () => unknown[];
+    } = {},
+  ): CreateFakePluginHostOptions["sdk"] => ({
     threads: {
       get: ({ threadId }: { threadId: string }) =>
-        makeThreadResponse({ id: threadId }),
+        makeThreadResponse({
+          id: threadId,
+          environmentId:
+            overrides.environmentId === undefined ? "env_wt" : overrides.environmentId,
+        }),
       interactions: { list: () => [] },
-      list: () => [],
+      list: (args) =>
+        args?.environmentId !== undefined
+          ? ((overrides.environmentThreads?.() ?? []) as never)
+          : [],
+    },
+    environments: {
+      get: ({ environmentId }: { environmentId: string }) =>
+        environments[environmentId] as never,
     },
     terminals: {
       list: () => ({
@@ -1869,62 +1901,196 @@ describe("reaping on settle", () => {
     },
   });
 
-  it("closes the settled thread's live terminals", async () => {
-    const host = load({ sdk: reaping() });
+  const killedVite = {
+    killed: [{ pid: 4812, command: "node vite --port 4321" }],
+    failed: 0,
+    refused: null,
+  };
 
-    const result = (await host.harness.behavior.callRpc("settle", {
-      threadId: "thr_done",
-    })) as {
-      reaped: { terminalsClosed: Array<{ terminalId: string; title: string }> };
-    };
+  /** The `reaped` message the settle published once its reap finished. */
+  const reapedMessage = (host: FakePluginHost) =>
+    host.harness.inspection.realtimeSignals.find(
+      (signal) =>
+        signal.channel === "lifecycle" &&
+        (signal.payload as { reaped?: unknown } | undefined)?.reaped !== undefined,
+    )?.payload as { threadId: string; reaped: ReapSummary } | undefined;
+
+  const settleAndReap = async (host: FakePluginHost, threadId = "thr_done") => {
+    const result = await host.harness.behavior.callRpc("settle", { threadId });
+    await flushTasks();
+    return result;
+  };
+
+  // The settle is the user's decision and is answered at once; the reap
+  // follows and reports on the channel.
+  it("returns before the reap and publishes what it stopped", async () => {
+    let releaseHost: (value: unknown) => void = () => {};
+    const host = load({
+      sdk: reaping(),
+      experimental_callHostRpc: () =>
+        new Promise((resolve) => {
+          releaseHost = resolve;
+        }),
+    });
+
+    expect(await host.harness.behavior.callRpc("settle", { threadId: "thr_done" })).toEqual({
+      ok: true,
+    });
+    await flushTasks();
+    expect(reapedMessage(host)).toBeUndefined();
+
+    releaseHost(killedVite);
+    await flushTasks();
+
+    const message = reapedMessage(host);
+    expect(message?.threadId).toBe("thr_done");
+    // Named, not counted: the user has to be able to tell which server stopped.
+    expect(message?.reaped.terminalsClosed).toEqual([
+      { terminalId: "term_live", title: "pnpm dev" },
+    ]);
+    expect(message?.reaped.processesKilled).toEqual(killedVite.killed);
+  });
+
+  // The whole point of the host entry: the sweep runs on the machine that
+  // holds the worktree, not on the server's.
+  it("sweeps the worktree on the machine that holds it", async () => {
+    const host = load({
+      sdk: reaping(),
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
 
     expect(
-      host.harness.inspection.sdk.callsTo("terminals.close"),
-    ).toHaveLength(1);
-    // Named, not counted: the user has to be able to tell which server stopped.
-    expect(result.reaped.terminalsClosed).toEqual([
-      { terminalId: "term_live", title: "pnpm dev" },
+      host.harness.inspection.experimental_hostRpcCalls.map(
+        ({ method, input, hostId }) => ({ method, input, hostId }),
+      ),
+    ).toEqual([
+      { method: "reapDirectory", input: { directory: WORKTREE }, hostId: "host_remote" },
     ]);
   });
 
-  it("leaves every terminal alone when the setting is off", async () => {
+  // A project checkout is where the user works too, and nothing running there
+  // can be told apart from what an agent left behind.
+  it("closes terminals but sweeps nothing in a project checkout", async () => {
+    const host = load({
+      sdk: reaping({ environmentId: "env_main" }),
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+    expect(reapedMessage(host)?.reaped.terminalsClosed).toHaveLength(1);
+  });
+
+  it("leaves a worktree alone while another thread is mid-turn in it", async () => {
+    const host = load({
+      sdk: reaping({
+        environmentThreads: () => [
+          makeThreadResponse({ id: "thr_done", status: "idle" }),
+          makeThreadResponse({ id: "thr_sibling", status: "active" }),
+        ],
+      }),
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+    expect(reapedMessage(host)?.reaped.worktreesSkipped).toEqual([
+      { path: WORKTREE, reason: "in-use" },
+    ]);
+  });
+
+  // An idle sibling does not protect the worktree: its dev server looks the
+  // same as the settled thread's, and the SPEC chose to stop it.
+  it("still sweeps a worktree shared with an idle thread", async () => {
+    const host = load({
+      sdk: reaping({
+        environmentThreads: () => [
+          makeThreadResponse({ id: "thr_sibling", status: "idle" }),
+        ],
+      }),
+      experimental_callHostRpc: () => killedVite,
+    });
+    await settleAndReap(host);
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toHaveLength(1);
+  });
+
+  it("reports an unreachable machine and stops nothing there", async () => {
+    const host = load({
+      sdk: reaping(),
+      experimental_callHostRpc: () => {
+        throw new Error("host offline");
+      },
+    });
+    const result = await settleAndReap(host);
+
+    expect(result).toEqual({ ok: true });
+    expect(reapedMessage(host)?.reaped).toMatchObject({
+      processesKilled: [],
+      worktreesSkipped: [{ path: WORKTREE, reason: "unreachable" }],
+    });
+    expect(await listRows(host)).toHaveLength(1);
+  });
+
+  // Settle no longer waits for the reap, so an undo can land while it runs.
+  // The user took the decision back; nothing more may be stopped for it.
+  it("stops reaping when the settle is undone mid-reap", async () => {
+    let releaseTerminals: () => void = () => {};
+    const host = load({
+      sdk: {
+        ...reaping(),
+        terminals: {
+          list: () =>
+            new Promise((resolve) => {
+              releaseTerminals = () => resolve({ sessions: [] });
+            }),
+        },
+      },
+      experimental_callHostRpc: () => killedVite,
+    });
+    await host.harness.behavior.callRpc("settle", { threadId: "thr_done" });
+    await flushTasks();
+    await host.harness.behavior.callRpc("unsettle", { threadId: "thr_done" });
+    releaseTerminals();
+    await flushTasks();
+
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+  });
+
+  it("leaves everything alone when the setting is off", async () => {
     const host = load({
       settings: { reapOnSettle: false },
       sdk: reaping(),
     });
-
-    const result = (await host.harness.behavior.callRpc("settle", {
-      threadId: "thr_done",
-    })) as { reaped: { enabled: boolean } };
+    await settleAndReap(host);
 
     expect(host.harness.inspection.sdk.callsTo("terminals.list")).toEqual([]);
-    expect(result.reaped.enabled).toBe(false);
+    expect(reapedMessage(host)).toBeUndefined();
   });
 
   // A subtree bb will not enumerate still leaves the thread the user actually
   // settled, and reaping that one is strictly better than reaping none.
   it("falls back to the thread itself when its children cannot be listed", async () => {
+    const base = reaping();
     const host = load({
       sdk: {
-        ...reaping(),
+        ...base,
         threads: {
-          get: ({ threadId }: { threadId: string }) =>
-            makeThreadResponse({ id: threadId }),
-          interactions: { list: () => [] },
-          list: () => {
-            throw new Error("no children for you");
+          ...base?.threads,
+          list: (args) => {
+            if (args?.parentThreadId !== undefined) {
+              throw new Error("no children for you");
+            }
+            return [];
           },
         },
       },
+      experimental_callHostRpc: () => killedVite,
     });
+    await settleAndReap(host);
 
-    const result = (await host.harness.behavior.callRpc("settle", {
-      threadId: "thr_done",
-    })) as {
-      reaped: { terminalsClosed: Array<{ terminalId: string }> };
-    };
-
-    expect(result.reaped.terminalsClosed).toHaveLength(1);
+    expect(reapedMessage(host)?.reaped.terminalsClosed).toHaveLength(1);
   });
 
   // The settle is the user's decision; cleanup is housekeeping that follows
@@ -1939,14 +2105,11 @@ describe("reaping on settle", () => {
           },
         },
       },
+      experimental_callHostRpc: () => killedVite,
     });
+    await settleAndReap(host);
 
-    const result = (await host.harness.behavior.callRpc("settle", {
-      threadId: "thr_done",
-    })) as { ok: boolean; reaped: { terminalsFailed: number } };
-
-    expect(result.ok).toBe(true);
-    expect(result.reaped.terminalsFailed).toBe(1);
+    expect(reapedMessage(host)?.reaped.terminalsFailed).toBe(1);
     expect(await listRows(host)).toHaveLength(1);
   });
 });

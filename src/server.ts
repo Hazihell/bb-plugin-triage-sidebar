@@ -6,9 +6,6 @@
 // understands. Here, uninstalling the plugin removes its state with it.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { promisify } from "node:util";
 import {
   resolveSettledSweepAction,
   type ThreadActivitySignals,
@@ -17,7 +14,7 @@ import {
   createProjectAvatarStore,
   projectAvatarRpcContract,
 } from "./project-avatar-store";
-import { reapWorktree } from "./reap";
+import { hostContract } from "./host-contract";
 import {
   forEachLimited,
   isRunningStatus,
@@ -169,6 +166,9 @@ const reapSummarySchema = z.object({
     z.object({ pid: z.number(), command: z.string() }),
   ),
   processesFailed: z.number(),
+  worktreesSkipped: z.array(
+    z.object({ path: z.string(), reason: z.enum(["in-use", "unreachable"]) }),
+  ),
 });
 
 export const triageSidebarRpcContract = defineRpcContract({
@@ -187,16 +187,11 @@ export const triageSidebarRpcContract = defineRpcContract({
       ),
     }),
   },
-  // Settling reports what the reap did, not just "ok": killing a user's dev
-  // server is a visible act, and a settle that silently stopped something
-  // would leave them hunting for a server that is no longer listening.
-  settle: {
-    input: threadIdSchema,
-    output: z.object({
-      ok: z.boolean(),
-      reaped: reapSummarySchema,
-    }),
-  },
+  // Settling returns as soon as the shelf is written. The reap that follows
+  // can take seconds — a dev server gets its grace period to exit — and the
+  // user's decision must not wait on it. What it stopped arrives afterwards
+  // on the lifecycle channel as a `reaped` message.
+  settle: { input: threadIdSchema, output: z.object({ ok: z.boolean() }) },
   unsettle: { input: threadIdSchema, output: z.object({ ok: z.boolean() }) },
   snooze: {
     input: z.object({
@@ -252,13 +247,14 @@ export const triageSidebarRpcContract = defineRpcContract({
   ...projectAvatarRpcContract,
 });
 
-const execFileAsync = promisify(execFile);
-
 /** Channel the frontend re-reads on. */
 export const LIFECYCLE_CHANNEL = "lifecycle";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+
+/** How long one worktree sweep may take on its host. */
+const REAP_HOST_TIMEOUT_MS = 60_000;
 
 /** How long after load the turn-timing backfill starts. */
 export const BACKFILL_DELAY_MS = 2_000;
@@ -431,6 +427,12 @@ export interface ReapSummary {
   terminalsFailed: number;
   processesKilled: Array<{ pid: number; command: string }>;
   processesFailed: number;
+  /**
+   * Worktrees whose processes were deliberately left running, named because
+   * the user may expect them stopped: another thread is mid-turn there, or
+   * the machine holding it could not be reached.
+   */
+  worktreesSkipped: Array<{ path: string; reason: "in-use" | "unreachable" }>;
 }
 
 export function emptyReapSummary(enabled: boolean): ReapSummary {
@@ -440,6 +442,7 @@ export function emptyReapSummary(enabled: boolean): ReapSummary {
     terminalsFailed: 0,
     processesKilled: [],
     processesFailed: 0,
+    worktreesSkipped: [],
   };
 }
 
@@ -458,6 +461,7 @@ export function mergeReapSummaries(
     terminalsFailed: into.terminalsFailed + next.terminalsFailed,
     processesKilled: [...into.processesKilled, ...next.processesKilled],
     processesFailed: into.processesFailed + next.processesFailed,
+    worktreesSkipped: [...into.worktreesSkipped, ...next.worktreesSkipped],
   };
 }
 
@@ -573,7 +577,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Stop leftover terminals and processes when a thread settles",
       description:
-        "Settling a thread means its work is done, so its terminals are closed and anything still running in its worktree — dev servers, watchers, bundlers an agent started and never stopped — is stopped too. This includes the thread's child threads. A worktree shared with another thread you have NOT settled loses its processes as well: a process that outlived its terminal carries nothing to tell the two apart. Turn this off to leave every process running, as before.",
+        "Settling a thread means its work is done, so its terminals are closed and anything still running in its worktree — dev servers, watchers, bundlers an agent started and never stopped — is stopped too, on whichever machine holds the worktree. This includes the thread's child threads. A thread in the project's own checkout only has its terminals closed: nothing else there is swept. A worktree where another thread is mid-turn is left alone; one shared with an idle thread you have NOT settled loses its processes, because a process that outlived its terminal carries nothing to tell the two apart. Turn this off to leave every process running.",
       default: true,
     },
     remoteAvatarsEnabled: {
@@ -805,9 +809,14 @@ export default function plugin(bb: BbPluginApi) {
         lastRunEndedAt: readOne(threadId)?.lastRunEndedAt ?? null,
       });
       // After the write, never before: the shelf is the user's decision and
-      // it stands even if every part of the cleanup fails.
-      const reaped = await reapQuietly(threadId, "settle");
-      return { ok: true, reaped };
+      // it stands even if every part of the cleanup fails. Not awaited — the
+      // outcome is published when it is known.
+      void reapQuietly(threadId, "settle").then((reaped) => {
+        if (reaped.enabled) {
+          bb.realtime.publish(LIFECYCLE_CHANNEL, { threadId, reaped });
+        }
+      });
+      return { ok: true };
     },
     async unsettle({ threadId }) {
       clear(threadId);
@@ -1007,58 +1016,40 @@ export default function plugin(bb: BbPluginApi) {
     }
   };
 
+  const hostClient = bb.hosts.experimental_client({ contract: hostContract });
+
+  /** One worktree a subtree touches, and the machine that holds it. */
+  interface ReapTarget {
+    environmentId: string;
+    hostId: string;
+    path: string;
+  }
+
   /**
-   * The reaper's window onto the operating system.
-   *
-   * Held here rather than in src/reap.ts so that module stays pure enough to
-   * test without spawning anything: the rules live there, the syscalls here.
+   * Whether a thread outside the settled subtree is mid-turn in this
+   * environment. Its processes are indistinguishable from the settled
+   * thread's, and killing them under a running agent breaks work the user has
+   * not finished with. An unreadable list counts as in use.
    */
-  const reapDeps = {
-    readProcessTable: async (): Promise<string> => {
-      const { stdout } = await execFileAsync(
-        "ps",
-        ["-Ao", "pid=,ppid=,args="],
-        // A machine with thousands of processes still has to fit; the default
-        // buffer is 1MB and a truncated table would silently spare processes.
-        { maxBuffer: 32 * 1024 * 1024 },
+  const isEnvironmentInUse = async (
+    environmentId: string,
+    subtree: ReadonlySet<string>,
+  ): Promise<boolean> => {
+    try {
+      const threads = await bb.sdk.threads.list({
+        environmentId,
+        archived: false,
+        includeHidden: true,
+      });
+      return threads.some(
+        (thread) => !subtree.has(thread.id) && isThreadWorking(thread),
       );
-      return stdout;
-    },
-    readWorkingDirectories: async (): Promise<string | null> => {
-      try {
-        const { stdout } = await execFileAsync(
-          "lsof",
-          // -F pn is the machine-readable form: process records and names only.
-          ["-a", "-d", "cwd", "-F", "pn"],
-          { maxBuffer: 32 * 1024 * 1024 },
-        );
-        return stdout;
-      } catch (error) {
-        // lsof exits non-zero when it could not read every process, which on a
-        // shared machine is the normal case — the partial output it printed is
-        // still the best answer available, and only a total absence of stdout
-        // means there is nothing to work with.
-        const stdout = (error as { stdout?: string }).stdout ?? "";
-        return stdout === "" ? null : stdout;
-      }
-    },
-    kill: async (pid: number, signal: "SIGTERM" | "SIGKILL"): Promise<void> => {
-      process.kill(pid, signal);
-    },
-    isAlive: async (pid: number): Promise<boolean> => {
-      try {
-        // Signal 0 tests for existence without delivering anything.
-        process.kill(pid, 0);
-        return true;
-      } catch (error) {
-        // EPERM means it exists and is someone else's — alive, and not ours
-        // to kill. Anything else means it is gone.
-        return (error as NodeJS.ErrnoException).code === "EPERM";
-      }
-    },
-    wait: (ms: number): Promise<void> =>
-      new Promise((resolve) => setTimeout(resolve, ms)),
-    log: bb.log,
+    } catch (error) {
+      bb.log.warn(
+        `reap: could not list the threads of ${environmentId}, leaving it alone (${String(error)})`,
+      );
+      return true;
+    }
   };
 
   /**
@@ -1070,14 +1061,18 @@ export default function plugin(bb: BbPluginApi) {
    * process that already escaped its shell: an agent's dev server detaches, is
    * reparented to init, and afterwards belongs to no terminal and no thread.
    * The worktree path is the only handle such a process still carries, so the
-   * second pass matches on that.
+   * second pass sweeps that — through the host entry on the machine holding
+   * the worktree, which is the only place its processes can be seen.
    *
    * Order matters. Terminals close first so their own children die with them,
    * and the worktree pass then only sees what genuinely outlived its session.
    *
-   * Best-effort throughout. This runs inside a user's settle, and a terminal
-   * that will not close or a process that will not die is reported and skipped
-   * rather than allowed to fail the settle itself.
+   * Only worktrees are swept. A project checkout is where the user works too —
+   * their shells, their editor, their own dev server — and nothing running
+   * there can be told apart from what an agent left behind.
+   *
+   * Best-effort throughout. A terminal that will not close, a machine that
+   * cannot be reached or a process that will not die is reported and skipped.
    */
   const reapThreadSubtree = async (
     rootThreadId: string,
@@ -1099,36 +1094,29 @@ export default function plugin(bb: BbPluginApi) {
       subtree = [rootThreadId];
     }
 
-    const terminalsClosed: Array<{ terminalId: string; title: string }> = [];
-    let terminalsFailed = 0;
-    // One entry per worktree the subtree touches, keyed by its resolved path so
-    // two threads naming the same directory differently still sweep it once. A
-    // subtree usually shares one environment, and a second sweep would kill
-    // nothing twice but would cost another `ps` and `lsof`.
-    const worktrees = new Map<string, string[]>();
+    const summary = emptyReapSummary(true);
+    // Settle returns before the reap runs, so the user can take it back while
+    // this is still working. Every destructive step asks first: an undone
+    // settle stops the reap where it stands.
+    const stillSettled = () => (readOne(rootThreadId)?.settledAt ?? null) !== null;
+    // One entry per environment, so a subtree sharing one worktree — the
+    // usual case — sweeps it once.
+    const targets = new Map<string, ReapTarget>();
 
     for (const threadId of subtree) {
+      if (!stillSettled()) return summary;
       try {
         const thread = await bb.sdk.threads.get({ threadId });
         const environmentId = thread.environmentId ?? null;
-        if (environmentId !== null) {
-          const environment = await bb.sdk.environments.get({
-            environmentId,
-          });
-          const path = environment?.path ?? null;
-          // A path this machine cannot see belongs to another host, and this
-          // plugin can only kill processes on its own.
-          if (path !== null && path.trim() !== "" && existsSync(path)) {
-            // Both names, because the two halves of the selection disagree
-            // about which one they will see: bb records the path the user
-            // gave, while the kernel reports a working directory already
-            // resolved through every symlink. On macOS a worktree under /tmp
-            // is always both.
-            const resolved = realpathSync(path);
-            worktrees.set(
-              resolved,
-              resolved === path ? [path] : [path, resolved],
-            );
+        if (environmentId !== null && !targets.has(environmentId)) {
+          const environment = await bb.sdk.environments.get({ environmentId });
+          const path = environment.path?.trim() ?? "";
+          if (environment.isWorktree && path !== "") {
+            targets.set(environmentId, {
+              environmentId,
+              hostId: environment.hostId,
+              path,
+            });
           }
         }
       } catch (error) {
@@ -1153,7 +1141,7 @@ export default function plugin(bb: BbPluginApi) {
               // whole feature exists to stop.
               mode: "force",
             });
-            terminalsClosed.push({
+            summary.terminalsClosed.push({
               terminalId: session.id,
               title: session.title,
             });
@@ -1161,47 +1149,60 @@ export default function plugin(bb: BbPluginApi) {
             bb.log.warn(
               `reap: closing terminal ${session.id} failed (${String(error)})`,
             );
-            terminalsFailed += 1;
+            summary.terminalsFailed += 1;
           }
         }
       } catch (error) {
         bb.log.warn(
           `reap: could not list the terminals of ${threadId} (${String(error)})`,
         );
-        terminalsFailed += 1;
+        summary.terminalsFailed += 1;
       }
     }
 
-    let processesKilled: Array<{ pid: number; command: string }> = [];
-    let processesFailed = 0;
-    for (const worktreePaths of worktrees.values()) {
-      const report = await reapWorktree(
-        {
-          worktreePaths,
-          // The plugin runs inside bb's own process tree, which lives nowhere
-          // near a worktree — but a reap that could kill its own host would be
-          // a bad thing to leave to luck.
-          selfPids: new Set([process.pid, process.ppid]),
-        },
-        reapDeps,
-      );
-      processesKilled = [...processesKilled, ...report.killed];
-      processesFailed += report.failed;
+    const subtreeIds = new Set(subtree);
+    for (const target of targets.values()) {
+      if (!stillSettled()) return summary;
+      if (await isEnvironmentInUse(target.environmentId, subtreeIds)) {
+        summary.worktreesSkipped.push({ path: target.path, reason: "in-use" });
+        continue;
+      }
+      try {
+        const report = await hostClient.call(
+          "reapDirectory",
+          { directory: target.path },
+          // The kill gives each process a grace period and re-checks for
+          // stragglers; the default 30s is too tight for a busy worktree.
+          { hostId: target.hostId, timeoutMs: REAP_HOST_TIMEOUT_MS },
+        );
+        if (report.refused !== null) {
+          bb.log.warn(`reap: host refused ${target.path} (${report.refused})`);
+        }
+        summary.processesKilled.push(...report.killed);
+        summary.processesFailed += report.failed;
+      } catch (error) {
+        // No deferred retry: by the time the machine is back, the worktree
+        // may hold new work, and a kill queued now would land on it.
+        bb.log.warn(
+          `reap: could not reach host ${target.hostId} for ${target.path}, nothing stopped (${String(error)})`,
+        );
+        summary.worktreesSkipped.push({
+          path: target.path,
+          reason: "unreachable",
+        });
+      }
     }
 
-    if (processesKilled.length > 0 || terminalsClosed.length > 0) {
+    if (
+      summary.processesKilled.length > 0 ||
+      summary.terminalsClosed.length > 0 ||
+      summary.worktreesSkipped.length > 0
+    ) {
       bb.log.info(
-        `reap: ${rootThreadId} — closed ${terminalsClosed.length} terminals, killed ${processesKilled.length} processes across ${worktrees.size} worktrees`,
+        `reap: ${rootThreadId} — closed ${summary.terminalsClosed.length} terminals, killed ${summary.processesKilled.length} processes across ${targets.size} worktrees, skipped ${summary.worktreesSkipped.length}`,
       );
     }
-
-    return {
-      enabled: true,
-      terminalsClosed,
-      terminalsFailed,
-      processesKilled,
-      processesFailed,
-    };
+    return summary;
   };
 
   /**
