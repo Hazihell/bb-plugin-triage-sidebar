@@ -331,7 +331,7 @@ function PortRow({
           )}
         >
           {phase === "idle" ? (
-            <Icon name="Stop" className="size-3" aria-hidden />
+            <Icon name="CircleX" className="size-3.5" aria-hidden />
           ) : phase === "confirm" ? (
             "Confirm stop?"
           ) : (
