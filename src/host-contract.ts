@@ -30,4 +30,17 @@ export const hostContract = defineRpcContract({
       })
       .strict(),
   },
+  /**
+   * The TCP ports listening under each directory, from one scan of the
+   * machine. Read-only: nothing is signalled. Every directory asked about has
+   * an entry, empty when nothing listens there.
+   */
+  listPorts: {
+    input: z
+      .object({ directories: z.array(z.string().min(1)).max(500) })
+      .strict(),
+    output: z
+      .object({ ports: z.record(z.string(), z.array(z.number())) })
+      .strict(),
+  },
 });

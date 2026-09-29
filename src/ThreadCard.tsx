@@ -25,6 +25,7 @@ import { STATUS_SLOT_CLASS, StatusOrTime } from "./StatusSlot";
 import { WAITING_COLOR } from "./StatusGlyph";
 import type { CacheWindow } from "./cache-window";
 import { resolveSnoozePresets } from "./lifecycle";
+import { PortPills } from "./PortPills";
 
 /**
  * One thread as a three-line card: project and status, title, then branch and
@@ -48,6 +49,7 @@ export function ThreadCard({
   childWork,
   cacheWindow,
   now,
+  ports,
 }: {
   thread: PluginSidebarThread;
   projectName: string | null;
@@ -90,6 +92,8 @@ export function ThreadCard({
   cacheWindow: CacheWindow;
   /** Quantized clock, so every card in one render agrees on "now". */
   now: number;
+  /** What this thread's worktree is listening on, app ports first. */
+  ports?: readonly number[];
 }) {
   const split = useSidebarThreadSplit(thread.id);
   const shortcut = useSidebarThreadShortcut(thread.id);
@@ -208,6 +212,7 @@ export function ThreadCard({
                 className={WAITING_COLOR}
               />
             ) : null}
+            <PortPills ports={ports} />
             {pullRequest ? (
               <a
                 href={pullRequest.url}

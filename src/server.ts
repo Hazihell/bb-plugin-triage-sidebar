@@ -18,6 +18,7 @@ import {
   projectAvatarRpcContract,
 } from "./project-avatar-store";
 import { hostContract } from "./host-contract";
+import { createPortHandlers, portsRpcContract } from "./ports-rpc";
 import {
   archiveTreeOf,
   buildThreadIndex,
@@ -299,6 +300,7 @@ export const triageSidebarRpcContract = defineRpcContract({
     }),
   },
   ...projectAvatarRpcContract,
+  ...portsRpcContract,
 });
 
 export { LIFECYCLE_CHANNEL } from "./lifecycle-sync";
@@ -572,6 +574,13 @@ export default function plugin(bb: BbPluginApi) {
         "Asks the project's git host — github.com, gitlab.com, or your own server — for the owner's avatar image, once. This is an outbound request to that host from this machine. It is asked once per project and never again on a timer — the Settings panel refreshes one project on demand. A private or self-hosted host will usually refuse it, and those projects fall back to a generated monogram. Turn this off to make no such request at all; avatars you set yourself keep working either way.",
       default: true,
     },
+    portsEnabled: {
+      type: "boolean",
+      label: "Show listening ports on threads",
+      description:
+        "Shows a pill such as :3000 on a thread whose worktree or checkout has something listening — a dev server, a preview. While the sidebar is open, the machine holding the worktree lists its listening sockets about every ten seconds; nothing is started, stopped or sent anywhere. Turn this off to stop the scan.",
+      default: true,
+    },
     localFaviconsEnabled: {
       type: "boolean",
       label: "Use a project's own icon from its folder",
@@ -843,6 +852,17 @@ export default function plugin(bb: BbPluginApi) {
   });
 
 
+  const ports = createPortHandlers({
+    readEnabled: async () => (await settings.get()).portsEnabled === true,
+    scanHost: (hostId, directories, { timeoutMs }) =>
+      hostClient.call(
+        "listPorts",
+        { directories },
+        { hostId, signal: lifetime.signal, timeoutMs },
+      ),
+    log: bb.log,
+  });
+
   bb.rpc.register(triageSidebarRpcContract, {
     async listLifecycle() {
       // Read together, synchronously: no change can land between the rows and
@@ -916,6 +936,7 @@ export default function plugin(bb: BbPluginApi) {
       };
     },
     ...avatars.handlers,
+    ...ports,
   });
 
   // Turning the switch off has to take effect now, not at the next sweep: the

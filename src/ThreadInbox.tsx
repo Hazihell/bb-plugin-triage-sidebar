@@ -19,6 +19,7 @@ import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { isWorking, useLifecycle } from "./useLifecycle";
 import { useCacheWindow } from "./useCacheWindow";
+import { usePorts } from "./usePorts";
 import { useClock } from "./clock";
 import type { CacheWindow } from "./cache-window";
 import { useProjectAvatars } from "./useProjectAvatars";
@@ -127,6 +128,15 @@ export function ThreadInbox({
     };
   }, [lifecycle, scope, threads]);
 
+  // Only the rows this list can show are scanned for; a child shares its
+  // parent's worktree, and one scan per machine covers every directory.
+  const ports = usePorts(
+    useMemo(
+      () => [...live.pinned, ...live.inbox, ...live.snoozed, ...live.settled],
+      [live],
+    ),
+  );
+
   // What changed underneath the list without the user seeing it happen: the
   // host's threads or the parking store landing, or a different project.
   // Order changes across one of these are adopted at once, frozen or not, and
@@ -190,6 +200,7 @@ export function ThreadInbox({
       childWork={childWorkByParent.get(thread.id) ?? noChildWork}
       cacheWindow={cacheWindow}
       now={now}
+      ports={ports.get(thread.id)}
     />
   );
 
@@ -307,6 +318,7 @@ export function ThreadInbox({
               onNavigate={onNavigate}
               now={now}
               cacheWindow={cacheWindow}
+              ports={ports}
             />
             <ParkedShelf
               label="Settled"
@@ -320,6 +332,7 @@ export function ThreadInbox({
               onNavigate={onNavigate}
               now={now}
               cacheWindow={cacheWindow}
+              ports={ports}
             />
           </>
         )}
@@ -354,6 +367,7 @@ function ParkedShelf({
   onNavigate,
   now,
   cacheWindow,
+  ports,
 }: {
   label: string;
   threads: readonly PluginSidebarThread[];
@@ -366,6 +380,7 @@ function ParkedShelf({
   onNavigate: () => void;
   now: number;
   cacheWindow: CacheWindow;
+  ports: ReadonlyMap<string, readonly number[]>;
 }) {
   if (threads.length === 0) return null;
   return (
@@ -407,6 +422,7 @@ function ParkedShelf({
               cacheWindow={cacheWindow}
               park={parkFor(thread)}
               onNavigate={onNavigate}
+              ports={ports.get(thread.id)}
               onRestore={() =>
                 shelf === "snoozed"
                   ? lifecycle.unsnooze(thread.id)

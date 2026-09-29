@@ -12,6 +12,7 @@ import { ThreadRowLink } from "./ThreadRowLink";
 import { ROW_ACTION_BUTTON_CLASS, RowAside } from "./RowAside";
 import { snoozeWakeLabel } from "./lifecycle";
 import type { CacheWindow } from "./cache-window";
+import { PortPills } from "./PortPills";
 
 /**
  * A parked thread: one line instead of a card. Density comes from the user
@@ -32,6 +33,7 @@ export function SlimRow({
   park,
   onNavigate,
   onRestore,
+  ports,
 }: {
   thread: PluginSidebarThread;
   isActive: boolean;
@@ -46,6 +48,8 @@ export function SlimRow({
   park: ParkMenuActions;
   onNavigate: () => void;
   onRestore: () => void;
+  /** What this thread's worktree is listening on, as on a card. */
+  ports?: readonly number[];
 }) {
   const split = useSidebarThreadSplit(thread.id);
   const shortcut = useSidebarThreadShortcut(thread.id);
@@ -81,6 +85,7 @@ export function SlimRow({
           >
             <ThreadTitle threadId={thread.id} />
           </span>
+          <PortPills ports={ports} />
           {/* Left of the slot, as on a card: the jump key while the modifier
               is held; otherwise, for a snoozed row, when it comes back, which
               yields on hover to the restore button. The slot itself keeps the

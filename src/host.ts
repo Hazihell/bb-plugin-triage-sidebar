@@ -8,8 +8,9 @@
  * where the processes live.
  */
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, realpathSync } from "node:fs";
+import { readlink } from "node:fs/promises";
+import { homedir, platform } from "node:os";
 import { promisify } from "node:util";
 import {
   experimental_defineHostEntry,
@@ -17,6 +18,7 @@ import {
 } from "@get-bb/plugin-sdk/host";
 import { hostContract } from "./host-contract";
 import { reapDirectory, type DirectoryReapDeps } from "./reap";
+import { parseCwds, scanPorts, type PortScanDeps } from "./ports";
 
 const execFileAsync = promisify(execFile);
 
@@ -47,11 +49,61 @@ export const hostDeps: DirectoryReapDeps = {
   log: { warn: (message) => console.warn(message) },
 };
 
-export function createHostEntry(deps: DirectoryReapDeps = hostDeps) {
+/**
+ * lsof exits non-zero when any file is inaccessible — routine on a shared
+ * machine — and when it finds nothing at all. Output is still the answer.
+ */
+async function runLsof(args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("lsof", args, {
+      timeout: 5_000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return stdout;
+  } catch (error) {
+    const stdout = (error as { stdout?: unknown }).stdout;
+    if (typeof stdout === "string" && (error as { code?: unknown }).code === 1) {
+      return stdout;
+    }
+    throw error;
+  }
+}
+
+export const portScanDeps: PortScanDeps = {
+  home: homedir(),
+  readListeners: () => runLsof(["-nP", "-iTCP", "-sTCP:LISTEN"]),
+  readCwds: async (pids) => {
+    // /proc is authoritative on Linux; macOS needs a second lsof.
+    if (platform() === "linux") {
+      const cwds = new Map<number, string>();
+      await Promise.all(
+        pids.map(async (pid) => {
+          try {
+            cwds.set(pid, await readlink(`/proc/${pid}/cwd`));
+          } catch {
+            // Exited since the first pass, or another user's.
+          }
+        }),
+      );
+      return cwds;
+    }
+    return parseCwds(await runLsof(["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"]));
+  },
+  realpath: (directory) => realpathSync(directory),
+  log: { warn: (message) => console.warn(message) },
+};
+
+export function createHostEntry(
+  deps: DirectoryReapDeps = hostDeps,
+  portDeps: PortScanDeps = portScanDeps,
+) {
   return experimental_defineHostEntry({
     contract: hostContract,
     handlers: {
       reapDirectory: ({ directory }) => reapDirectory(directory, deps),
+      listPorts: async ({ directories }) => ({
+        ports: await scanPorts(directories, portDeps),
+      }),
     },
   });
 }
