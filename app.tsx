@@ -13,6 +13,8 @@ import { ParentChip } from "./src/ParentChip";
 import { SubagentsChip } from "./src/SubagentsChip";
 import { ProjectAvatarSettings } from "./src/ProjectAvatarSettings";
 import { AutoArchiveSettings } from "./src/AutoArchiveSettings";
+import { RunCommandChip } from "./src/RunCommandChip";
+import { ProjectCommandsSettings } from "./src/ProjectCommandsSettings";
 
 export default definePluginApp((app) => {
   app.slots.experimental_threadList({
@@ -42,6 +44,14 @@ export default definePluginApp((app) => {
     component: SubagentsChip,
   });
 
+  // Last, so it sits at the right end of the header next to bb's own
+  // controls. Renders nothing for a project with no commands.
+  app.slots.experimental_threadHeaderAction({
+    id: "run-command",
+    title: "Run project command",
+    component: RunCommandChip,
+  });
+
   // Editing an avatar belongs here and nowhere else: it is per project, while
   // every entry in the sidebar's right-click menu is per thread, and it is a
   // decision made once rather than during triage.
@@ -62,5 +72,13 @@ export default definePluginApp((app) => {
     description:
       "Settled threads leave the sidebar for the archive once they are older than the retention period. The sweep runs on the interval set above; this runs it now and reports what it archived.",
     component: AutoArchiveSettings,
+  });
+
+  app.slots.settingsSection({
+    id: "project-commands",
+    title: "Project commands",
+    description:
+      "Commands a thread can run from its header, in a terminal on that thread. Mark one as the dev server to make it the header's play button.",
+    component: ProjectCommandsSettings,
   });
 });

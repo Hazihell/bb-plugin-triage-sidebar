@@ -20,6 +20,11 @@ import {
 import { hostContract } from "./host-contract";
 import { createPortHandlers, portsRpcContract } from "./ports-rpc";
 import {
+  createProjectCommandHandlers,
+  createProjectCommandStore,
+  projectCommandsRpcContract,
+} from "./project-commands";
+import {
   archiveTreeOf,
   buildThreadIndex,
   isThreadWorking,
@@ -125,6 +130,22 @@ const migrations = [
   // to the sidebar.
   `ALTER TABLE thread_lifecycle ADD COLUMN reap_started_at INTEGER`,
   `ALTER TABLE thread_lifecycle ADD COLUMN reap_ended_at INTEGER`,
+  // Per-project commands a thread can run from its header, owned by
+  // project-commands.ts. The list's order is sort_order, rewritten whole on
+  // every save.
+  `CREATE TABLE IF NOT EXISTS project_command (
+     project_id    TEXT NOT NULL,
+     id            TEXT NOT NULL,
+     name          TEXT NOT NULL,
+     command       TEXT NOT NULL,
+     sort_order    INTEGER NOT NULL,
+     is_dev_server INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (project_id, id)
+   )`,
+  // At most one dev server per project, held by the database as well as the
+  // validation in front of it.
+  `CREATE UNIQUE INDEX IF NOT EXISTS project_command_one_dev_server
+     ON project_command (project_id) WHERE is_dev_server = 1`,
 ];
 
 /**
@@ -301,6 +322,7 @@ export const triageSidebarRpcContract = defineRpcContract({
   },
   ...projectAvatarRpcContract,
   ...portsRpcContract,
+  ...projectCommandsRpcContract,
 });
 
 export { LIFECYCLE_CHANNEL } from "./lifecycle-sync";
@@ -863,6 +885,12 @@ export default function plugin(bb: BbPluginApi) {
     log: bb.log,
   });
 
+  const commands = createProjectCommandHandlers({
+    store: createProjectCommandStore(db),
+    projectOf: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId ?? null,
+    terminals: bb.sdk.terminals,
+  });
+
   bb.rpc.register(triageSidebarRpcContract, {
     async listLifecycle() {
       // Read together, synchronously: no change can land between the rows and
@@ -937,6 +965,7 @@ export default function plugin(bb: BbPluginApi) {
     },
     ...avatars.handlers,
     ...ports,
+    ...commands,
   });
 
   // Turning the switch off has to take effect now, not at the next sweep: the

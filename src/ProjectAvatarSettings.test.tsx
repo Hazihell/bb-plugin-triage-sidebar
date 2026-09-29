@@ -93,6 +93,7 @@ describe("registration", () => {
     expect(app.settingsSections.map((s) => s.id)).toEqual([
       "project-avatars",
       "auto-archive",
+      "project-commands",
     ]);
   });
 
