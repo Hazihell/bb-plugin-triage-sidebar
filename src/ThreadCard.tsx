@@ -26,6 +26,7 @@ import { WAITING_COLOR } from "./StatusGlyph";
 import type { CacheWindow } from "./cache-window";
 import { resolveSnoozePresets } from "./lifecycle";
 import { PortsMenu } from "./PortsMenu";
+import { ThreadCommandsButton } from "./ThreadCommandsMenu";
 import type { PortListing } from "./host-contract";
 
 /**
@@ -214,6 +215,7 @@ export function ThreadCard({
               />
             ) : null}
             <PortsMenu threadId={thread.id} listing={ports} />
+            <ThreadCommandsButton thread={thread} row="card" />
             {pullRequest ? (
               <a
                 href={pullRequest.url}

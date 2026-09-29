@@ -835,6 +835,8 @@ describe("row context menu", () => {
       // bb's own list does not.
       "Settle",
       "Snooze",
+      // The project's commands, when the list knows the thread's project.
+      "Project commands…",
       "Open in split",
       "Mark unread",
       "Pin",
@@ -1081,7 +1083,14 @@ describe("row context menu", () => {
       within(menu)
         .getAllByRole("menuitem")
         .map((item) => item.textContent),
-    ).toEqual(["Open in split", "Mark unread", "Pin", "Archive", "Delete"]);
+    ).toEqual([
+      "Project commands…",
+      "Open in split",
+      "Mark unread",
+      "Pin",
+      "Archive",
+      "Delete",
+    ]);
   });
 
   it("hides the park actions on a thread blocked on the user", async () => {

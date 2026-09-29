@@ -19,6 +19,7 @@ import {
   MAX_COMMAND_LENGTH,
   MAX_COMMAND_NAME_LENGTH,
   MAX_COMMANDS_PER_PROJECT,
+  MAX_STATUS_THREADS,
 } from "./project-command-limits";
 
 export { MAX_COMMAND_LENGTH, MAX_COMMAND_NAME_LENGTH, MAX_COMMANDS_PER_PROJECT };
@@ -119,6 +120,19 @@ export const projectCommandsRpcContract = {
   threadCommandStatus: {
     input: z.object({ threadId: idSchema }),
     output: z.object({ commands: z.array(commandStatusSchema) }),
+  },
+  /**
+   * The same answer for many threads in one call: what the thread list asks
+   * on each tick for the rows on screen. A thread whose status cannot be read
+   * is left out rather than failing the rest.
+   */
+  threadsCommandStatus: {
+    input: z.object({ threadIds: z.array(idSchema).max(MAX_STATUS_THREADS) }),
+    output: z.object({
+      statuses: z.array(
+        z.object({ threadId: z.string(), commands: z.array(commandStatusSchema) }),
+      ),
+    }),
   },
   runProjectCommand: {
     input: z.object({ threadId: idSchema, commandId: idSchema }),
@@ -254,6 +268,18 @@ export function createProjectCommandHandlers(
     return command;
   };
 
+  const statusOf = async (threadId: string): Promise<ProjectCommandStatus[]> => {
+    const projectId = await deps.projectOf(threadId);
+    const commands = projectId === null ? [] : store.list(projectId);
+    // No commands, no terminal lookup: most threads pay nothing.
+    if (commands.length === 0) return [];
+    const live = await liveByTitle(threadId);
+    return commands.map((command) => ({
+      ...command,
+      terminalId: live.get(command.name) ?? null,
+    }));
+  };
+
   return {
     async listProjectCommands({ projectId }) {
       return { commands: store.list(projectId) };
@@ -262,17 +288,19 @@ export function createProjectCommandHandlers(
       return { commands: store.replace(projectId, commands) };
     },
     async threadCommandStatus({ threadId }) {
-      const projectId = await deps.projectOf(threadId);
-      const commands = projectId === null ? [] : store.list(projectId);
-      // No commands, no terminal lookup: most threads pay nothing.
-      if (commands.length === 0) return { commands: [] };
-      const live = await liveByTitle(threadId);
-      return {
-        commands: commands.map((command) => ({
-          ...command,
-          terminalId: live.get(command.name) ?? null,
-        })),
-      };
+      return { commands: await statusOf(threadId) };
+    },
+    async threadsCommandStatus({ threadIds }) {
+      const answers = await Promise.all(
+        [...new Set(threadIds)].map(async (threadId) => {
+          try {
+            return { threadId, commands: await statusOf(threadId) };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      return { statuses: answers.filter((answer) => answer !== null) };
     },
     async runProjectCommand({ threadId, commandId }) {
       const command = await commandFor(threadId, commandId);

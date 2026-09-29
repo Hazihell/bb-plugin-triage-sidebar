@@ -22,6 +22,7 @@ import {
 } from "./components/ContextMenu";
 import { resolveSnoozePresets, type ThreadShelf } from "./lifecycle";
 import { useHoldOrderWhile } from "./useOrderFreeze";
+import { ThreadCommandMenuItems } from "./ThreadCommandsMenu";
 
 /**
  * Everything the menu needs to park a thread, supplied by whoever owns the
@@ -93,6 +94,7 @@ export function RowContextMenu({
             <ContextMenuSeparator />
           </>
         ) : null}
+        <ThreadCommandMenuItems thread={thread} />
         <ContextMenuItem
           onSelect={() => actions.open(thread.id, { split: true })}
         >

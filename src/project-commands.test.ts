@@ -218,6 +218,15 @@ describe("running a command in a thread's terminal", () => {
     ]);
   });
 
+  it("reports many threads in one call, each once", async () => {
+    const { host, dev } = await setup([{ id: "term_live", title: "dev", status: "running" }]);
+    const status = await call<{
+      statuses: Array<{ threadId: string; commands: Array<{ id: string; terminalId: string | null }> }>;
+    }>(host, "threadsCommandStatus", { threadIds: ["thr_1", "thr_2", "thr_1"] });
+    expect(status.statuses.map((s) => s.threadId)).toEqual(["thr_1", "thr_2"]);
+    expect(status.statuses[0]!.commands[0]).toMatchObject({ id: dev.id, terminalId: "term_live" });
+  });
+
   it("refuses a command id from another project", async () => {
     const { host, create } = await setup();
     const other = await save(host, "prj_2", [draft({ name: "evil", command: "rm -rf ~" })]);

@@ -13,6 +13,7 @@ import { ROW_ACTION_BUTTON_CLASS, RowAside } from "./RowAside";
 import { snoozeWakeLabel } from "./lifecycle";
 import type { CacheWindow } from "./cache-window";
 import { PortsMenu } from "./PortsMenu";
+import { ThreadCommandsButton } from "./ThreadCommandsMenu";
 import type { PortListing } from "./host-contract";
 
 /**
@@ -87,6 +88,7 @@ export function SlimRow({
             <ThreadTitle threadId={thread.id} />
           </span>
           <PortsMenu threadId={thread.id} listing={ports} />
+          <ThreadCommandsButton thread={thread} row="slim" />
           {/* Left of the slot, as on a card: the jump key while the modifier
               is held; otherwise, for a snoozed row, when it comes back, which
               yields on hover to the restore button. The slot itself keeps the
