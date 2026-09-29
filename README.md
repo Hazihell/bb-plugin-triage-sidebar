@@ -5,6 +5,8 @@ the threads that need you rise to the top, and the ones you are done with
 fade out on their own. Each card also shows the ports its worktree is serving
 and runs the commands you saved for its project.
 
+<img src="https://github.com/user-attachments/assets/6906f1b5-7469-46b0-bfeb-977d813be030" alt="The Triage Sidebar inbox, with a hovered card showing Snooze and Settle" width="560">
+
 It needs bb 0.43.4 or later, and is built against plugin SDK 0.5.9. Install it
 from the Community marketplace on bb's Plugins page, or from a local checkout:
 
@@ -242,6 +244,8 @@ port, the pid, and the process behind it with its arguments, so the app can be
 told from the storybook before either is opened. The card stays open while the
 pointer is inside it; a click pins it open until dismissed.
 
+<img src="https://github.com/user-attachments/assets/e82e3696-2004-44e3-84c0-691c4746e26c" alt="The ports card for a thread serving four ports, each with Open in BB, Open in browser and stop" width="560">
+
 - **Open in BB** opens the port in a bb browser tab on that thread, and brings
   the thread forward so its side panel shows the tab.
 - **Open in browser** opens it in your default browser. A plain click on the
@@ -267,6 +271,8 @@ Anything that changed refreshes the card instead.
 Each project can keep up to 12 commands — `pnpm dev`, `npm test`, a seed
 script — edited in **Settings > Project commands**. One can be marked the dev
 server.
+
+<img src="https://github.com/user-attachments/assets/74f92121-237e-4853-9ee2-7c5195b5ecd9" alt="The project commands menu on a thread row, with a saved dev command" width="560">
 
 - **On the row**, a terminal icon beside the plug opens a menu to run or stop
   each command, and to edit the project's list. It shows on hover or keyboard
