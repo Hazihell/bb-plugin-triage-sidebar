@@ -2,10 +2,11 @@
 
 An inbox-style replacement for bb's sidebar thread list, built around triage:
 the threads that need you rise to the top, and the ones you are done with
-fade out on their own.
+fade out on their own. Each card also shows the ports its worktree is serving
+and runs the commands you saved for its project.
 
 It needs bb 0.43.4 or later, and is built against plugin SDK 0.5.9. Install it
-from a local checkout:
+from the Community marketplace on bb's Plugins page, or from a local checkout:
 
 ```sh
 bb plugin install . --yes
@@ -42,6 +43,10 @@ further from there.
   stay there whatever the attention sort says.
 - **A square per project.** Each card opens with a small coloured chip, so the
   eye can group the column into projects before it reads a word of it.
+- **Ports on the card.** A plug icon counts the ports a thread's worktree is
+  serving; its card opens each one in bb's browser or yours, or stops it.
+- **Project commands.** Commands you save per project — a dev server, a test
+  run — start and stop from the thread's row or header, in a bb terminal.
 
 ## The idea
 
@@ -229,12 +234,62 @@ and in both chips.
 An orphan — a child whose parent is deleted — stays in the list, and its
 header shows no parent chip.
 
+## Ports
+
+A card whose worktree is serving something shows a plug icon with a count,
+beside the agent's glyph. Hovering it opens a card with one line per port: the
+port, the pid, and the process behind it with its arguments, so the app can be
+told from the storybook before either is opened. The card stays open while the
+pointer is inside it; a click pins it open until dismissed.
+
+- **Open in BB** opens the port in a bb browser tab on that thread, and brings
+  the thread forward so its side panel shows the tab.
+- **Open in browser** opens it in your default browser. A plain click on the
+  port does the first, a ⌘- or Ctrl-click the second.
+- **Stop** asks once, and kills on a second click within three seconds.
+
+A port belongs to a thread by the process's working directory: a server
+started in a worktree works in that worktree. One `lsof` pass on the machine
+holding the worktree lists every listener, and each is credited to the deepest
+thread directory it sits under, so a worktree nested in a project checkout
+keeps its own ports. The list refreshes every 10 seconds while the sidebar is
+on screen. `lsof` makes this macOS and Linux only; a machine that does not
+answer within 10 seconds is left out of that refresh.
+
+Stopping never trusts the pid on screen, which may be seconds old. The server
+looks the thread's machine and directory up in bb, and that machine scans
+again and signals only if the same pid is still listening on the same port
+under the same directory. It sends SIGTERM, then SIGKILL after three seconds.
+Anything that changed refreshes the card instead.
+
+## Project commands
+
+Each project can keep up to 12 commands — `pnpm dev`, `npm test`, a seed
+script — edited in **Settings > Project commands**. One can be marked the dev
+server.
+
+- **On the row**, a terminal icon beside the plug opens a menu to run or stop
+  each command, and to edit the project's list. It shows on hover or keyboard
+  focus, and stays visible, with a dot, while one of the project's commands
+  runs in that thread. It is drawn for a project with no commands too, so the
+  first can be added from there.
+- **In the thread header**, the dev server is a play button, with the other
+  commands in a menu beside it. A project with no commands shows nothing.
+
+A command runs in a bb terminal on the thread, titled with the command's name,
+and a running command offers Stop instead of Run, so one click never starts a
+second copy. The frontend never sends a shell string: it sends a thread and a
+command id, and the server reads the project from bb and the command from its
+own table. The only way to make the plugin run a string is to save it in
+Settings. Renaming a command while it runs loses track of its terminal, which
+can still be closed from bb's terminal panel.
+
 ## What it demonstrates
 
 | Plugin API                                               | Used for                                                                         |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `experimental_threadList`                                | the sidebar's scrolling list (bb keeps New thread, search, nav rows, footer)     |
-| `experimental_threadHeaderAction`                        | the two header chips: children on a parent, and the way back on a child          |
+| `experimental_threadHeaderAction`                        | the header chips: children, the way back to a parent, and the Run button         |
 | `experimental_useSidebarThreads`                         | live threads and projects, from the host's own cache                             |
 | `experimental_useSidebarThreadActions`                   | open, open-in-split, read, pin, archive, delete                                  |
 | `useSidebarThreadDraft`, `…RowStatus`, `…Shortcut`       | the draft pencil, other plugins' row statuses, and the jump-key pill             |
@@ -242,11 +297,13 @@ header shows no parent chip.
 | `experimental_useSidebarThreadPullRequest`               | the `#412` badge, coloured by bb's attention state                               |
 | `experimental_ProviderIcon`, `experimental_useProviders` | the agent's glyph and name, from bb's provider directory                         |
 | host-shimmed Radix menus, vendored from bb's registry    | the right-click menu, the snooze presets, and the children menu                  |
-| `settingsSection`                                        | the per-project avatar editor, and the auto-archive "run now" report             |
+| `settingsSection`                                        | the avatar editor, the project commands editor, and the auto-archive report      |
 | `bb.settings.define`                                     | auto-archive, reaping, the cache window, and each automatic avatar source        |
 | `bb.background.schedule`                                 | the auto-archive pass (hourly ticker, user-set interval) and the avatar sweep    |
 | `bb.sdk.threads.events.list`                             | turn timing from bb's event log                                                  |
-| `experimental_defineHostEntry`                           | stopping a settled worktree's processes on the machine that holds it             |
+| `experimental_defineHostEntry`                           | scanning ports, stopping a port's process, and reaping a settled worktree        |
+| `sdk.experimental_desktopBrowsers`                       | opening a port in a bb browser tab owned by its thread                           |
+| `bb.sdk.terminals`                                       | running, finding and stopping a project command's terminal                       |
 | `bb.storage.database()` + `bb.rpc` + `bb.realtime`       | the parking store, pushed to every window as numbered row changes                |
 
 The plugin API ships **no components**. Status glyphs and the menus are this

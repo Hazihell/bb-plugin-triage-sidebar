@@ -2,7 +2,7 @@
   "name": "bb-plugin-triage-sidebar",
   "version": "0.1.0",
   "type": "module",
-  "description": "Replaces the BB thread list with a triage inbox: threads needing attention rise to the top, color-coded status, pinning, and auto-archive for settled threads.",
+  "description": "Replaces the BB thread list with a triage inbox: threads needing attention rise to the top, snoozed and settled threads step aside and auto-archive, and each card shows its worktree's ports and runs its project's commands.",
   "license": "MIT",
   "engines": {
     "bb": ">=0.43.4",
@@ -10,7 +10,7 @@
   },
   "bb": {
     "name": "Triage Sidebar",
-    "description": "Replaces the BB thread list with a triage inbox: threads needing attention rise to the top, color-coded status, pinning, and auto-archive for settled threads.",
+    "description": "Replaces the BB thread list with a triage inbox: threads needing attention rise to the top, snoozed and settled threads step aside and auto-archive, and each card shows its worktree's ports and runs its project's commands.",
     "branding": {
       "icon": "PanelLeft"
     },
