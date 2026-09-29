@@ -18,7 +18,7 @@ import {
 } from "@get-bb/plugin-sdk/host";
 import { hostContract } from "./host-contract";
 import { reapDirectory, type DirectoryReapDeps } from "./reap";
-import { parseCwds, scanPorts, type PortScanDeps } from "./ports";
+import { parseCommands, parseCwds, scanPorts, type PortScanDeps } from "./ports";
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +88,23 @@ export const portScanDeps: PortScanDeps = {
       return cwds;
     }
     return parseCwds(await runLsof(["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"]));
+  },
+  readCommands: async (pids) => {
+    // `args=` is argv only; the environment would need `e`, which is not asked.
+    try {
+      const { stdout } = await execFileAsync(
+        "ps",
+        ["-o", "pid=,args=", "-p", pids.join(",")],
+        { timeout: 5_000, maxBuffer: 1024 * 1024 },
+      );
+      return parseCommands(stdout);
+    } catch (error) {
+      // ps exits non-zero when a pid exited since the scan; the rest is
+      // still the answer.
+      const stdout = (error as { stdout?: unknown }).stdout;
+      if (typeof stdout === "string") return parseCommands(stdout);
+      throw error;
+    }
   },
   realpath: (directory) => realpathSync(directory),
   log: { warn: (message) => console.warn(message) },

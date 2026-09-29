@@ -10,11 +10,19 @@
  * credited to the deepest directory it sits under, so a worktree nested
  * inside a project checkout keeps its own ports.
  *
- * Modelled on bb-plugin-worktree-ports' host scan, cut down to what a pill
- * needs: a port number, in the order a user would open them.
+ * One `ps` call then names the process behind each port credited to a
+ * directory, so a user can tell the app from the storybook before opening it.
+ *
+ * Modelled on bb-plugin-worktree-ports' host scan, cut down to what the
+ * sidebar's port card shows, in the order a user would open them.
  */
-import { sep } from "node:path";
+import { basename, sep } from "node:path";
 import { refuseDirectory } from "./reap";
+import {
+  MAX_PORT_COMMAND_LENGTH,
+  type ListeningPort,
+  type PortListing,
+} from "./host-contract";
 
 /** One listening socket, as `lsof` reported it. */
 export interface Listener {
@@ -24,7 +32,7 @@ export interface Listener {
   port: number;
 }
 
-/** The most pills one directory reports; the row folds past three anyway. */
+/** The most ports one directory reports; the card counts the rest. */
 export const MAX_PORTS_PER_DIRECTORY = 8;
 
 /**
@@ -81,6 +89,42 @@ export function parseCwds(output: string): Map<number, string> {
   return cwds;
 }
 
+/** `ps -o pid=,args= -p <pids>`: the pid, then the whole command line. */
+export function parseCommands(output: string): Map<number, string> {
+  const commands = new Map<number, string>();
+  for (const line of output.split("\n")) {
+    const match = /^\s*(\d+)\s+(.*\S)\s*$/.exec(line);
+    if (match === null) continue;
+    commands.set(Number(match[1]), match[2]!);
+  }
+  return commands;
+}
+
+/** `NODE_ENV=dev`, as `env` or a wrapper script leaves it in argv. */
+const ENV_ASSIGNMENT = /^[A-Z_][A-Z0-9_]*=/;
+
+/**
+ * A command line as one short line: `node · vite --port 3000`.
+ *
+ * The program and every absolute path are cut to their last segment — the
+ * checkout's location is already the row's, and says nothing about which
+ * server this is. Environment assignments are dropped, since they are where
+ * a secret would be. Bounded, with an ellipsis where it was cut.
+ */
+export function summarizeCommand(args: string): string {
+  const tokens = args
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token !== "" && !ENV_ASSIGNMENT.test(token))
+    .map((token) => (token.startsWith("/") ? basename(token) || token : token));
+  if (tokens.length === 0) return "";
+  const [program, ...rest] = tokens;
+  const line = rest.length === 0 ? program! : `${program} · ${rest.join(" ")}`;
+  return line.length <= MAX_PORT_COMMAND_LENGTH
+    ? line
+    : `${line.slice(0, MAX_PORT_COMMAND_LENGTH - 1)}…`;
+}
+
 function trimTrailingSeparators(path: string): string {
   return path.replace(/[\\/]+$/, "") || sep;
 }
@@ -112,7 +156,7 @@ export function attributeToDirectory(
 /**
  * Backing services, matched on the lsof COMMAND — in both its full form and
  * the nine characters lsof truncates it to by default. Their ports are real, but a
- * pill that opens Postgres in a browser is a dead end, so they are dropped.
+ * row that opens Postgres in a browser is a dead end, so they are dropped.
  */
 const SERVICE_PROCESSES = new Set([
   "postgres",
@@ -144,7 +188,7 @@ function isLoopback(address: string): boolean {
 }
 
 /**
- * Whether a listener is worth a pill at all: not a database or docker's
+ * Whether a listener is worth a row at all: not a database or docker's
  * proxy, and not a loopback socket on an ephemeral port — an inspector or a
  * language server, which no one opens in a browser.
  */
@@ -165,6 +209,8 @@ export interface PortScanDeps {
   readListeners: () => Promise<string>;
   /** The working directory of each pid still readable. */
   readCwds: (pids: number[]) => Promise<Map<number, string>>;
+  /** Each pid's full command line, from one `ps` call. */
+  readCommands: (pids: number[]) => Promise<Map<number, string>>;
   /** The directory with symlinks resolved, as a process would report it. */
   realpath: (directory: string) => string;
   log: { warn: (message: string) => void };
@@ -176,14 +222,15 @@ export interface PortScanDeps {
  * The result has an entry for every directory asked about, empty when
  * nothing listens there, so a caller can tell "nothing" from "not asked".
  * A directory too wide to credit — the root, the home directory — gets
- * nothing: every process the user runs works somewhere under it.
+ * nothing: every process the user runs works somewhere under it. A port
+ * whose process `ps` cannot name is still reported, with no command.
  */
 export async function scanPorts(
   directories: readonly string[],
   deps: PortScanDeps,
-): Promise<Record<string, number[]>> {
-  const result: Record<string, number[]> = {};
-  for (const directory of directories) result[directory] = [];
+): Promise<Record<string, PortListing>> {
+  const result: Record<string, PortListing> = {};
+  for (const directory of directories) result[directory] = { ports: [], more: 0 };
 
   // Processes report resolved paths; `/tmp/w` is `/private/tmp/w` on macOS.
   const resolvedToAsked = new Map<string, string>();
@@ -218,19 +265,43 @@ export async function scanPorts(
   }
 
   const roots = [...resolvedToAsked.keys()];
-  const found = new Map<string, Set<number>>();
+  // Port to pid, per directory; the first listener on a port owns it, which
+  // folds a server's IPv4 and IPv6 sockets into one row.
+  const found = new Map<string, Map<number, number>>();
   for (const listener of listeners) {
     const cwd = cwds.get(listener.pid);
     if (cwd === undefined) continue;
     const root = attributeToDirectory(cwd, roots);
     if (root === null) continue;
     const asked = resolvedToAsked.get(root)!;
-    const ports = found.get(asked) ?? new Set<number>();
-    ports.add(listener.port);
+    const ports = found.get(asked) ?? new Map<number, number>();
+    if (!ports.has(listener.port)) ports.set(listener.port, listener.pid);
     found.set(asked, ports);
   }
+  if (found.size === 0) return result;
+
+  // Only the pids that made it onto a row, in one call.
+  const pids = new Set<number>();
+  for (const ports of found.values()) for (const pid of ports.values()) pids.add(pid);
+  let commands = new Map<number, string>();
+  try {
+    commands = await deps.readCommands([...pids]);
+  } catch (error) {
+    deps.log.warn(`ports: could not read process commands (${String(error)})`);
+  }
+
   for (const [directory, ports] of found) {
-    result[directory] = [...ports].sort(comparePorts).slice(0, MAX_PORTS_PER_DIRECTORY);
+    const sorted = [...ports.keys()].sort(comparePorts);
+    const shown: ListeningPort[] = sorted
+      .slice(0, MAX_PORTS_PER_DIRECTORY)
+      .map((port) => {
+        const pid = ports.get(port)!;
+        return { port, pid, command: summarizeCommand(commands.get(pid) ?? "") };
+      });
+    result[directory] = {
+      ports: shown,
+      more: Math.max(0, sorted.length - MAX_PORTS_PER_DIRECTORY),
+    };
   }
   return result;
 }

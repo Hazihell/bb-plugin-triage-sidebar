@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { triageSidebarRpcContract } from "./server";
+import type { PortListing } from "./host-contract";
 
-/** How often the pills refresh while the sidebar is on screen. */
+/** How often the ports refresh while the sidebar is on screen. */
 export const PORTS_POLL_MS = 10_000;
 
-const NO_PORTS: ReadonlyMap<string, readonly number[]> = new Map();
+const NO_PORTS: ReadonlyMap<string, PortListing> = new Map();
 
 /** Every machine's thread directories, deduplicated, in a stable order. */
 export function portTargets(
@@ -35,13 +36,13 @@ export function portTargets(
  */
 export function usePorts(
   threads: readonly PluginSidebarThread[],
-): ReadonlyMap<string, readonly number[]> {
+): ReadonlyMap<string, PortListing> {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
   const targets = useMemo(() => portTargets(threads), [threads]);
   // The effect restarts only when the set of directories changes, not on
   // every thread update that leaves them alone.
   const targetsKey = JSON.stringify(targets);
-  const [byDirectory, setByDirectory] = useState<ReadonlyMap<string, readonly number[]>>(NO_PORTS);
+  const [byDirectory, setByDirectory] = useState<ReadonlyMap<string, PortListing>>(NO_PORTS);
 
   useEffect(() => {
     const request = JSON.parse(targetsKey) as typeof targets;
@@ -57,13 +58,15 @@ export function usePorts(
       try {
         const result = await rpc.call("listPorts", { targets: request });
         if (cancelled) return;
-        const next = new Map<string, readonly number[]>();
+        const next = new Map<string, PortListing>();
         for (const entry of result.ports) {
-          if (entry.ports.length > 0) next.set(`${entry.hostId}\n${entry.directory}`, entry.ports);
+          if (entry.listing.ports.length > 0) {
+            next.set(`${entry.hostId}\n${entry.directory}`, entry.listing);
+          }
         }
         setByDirectory(next.size === 0 ? NO_PORTS : next);
       } catch {
-        // Keep the last pills; the next tick asks again.
+        // Keep the last ports; the next tick asks again.
       } finally {
         inFlight = false;
       }
@@ -83,7 +86,7 @@ export function usePorts(
 
   return useMemo(() => {
     if (byDirectory.size === 0) return NO_PORTS;
-    const byThread = new Map<string, readonly number[]>();
+    const byThread = new Map<string, PortListing>();
     for (const thread of threads) {
       const hostId = thread.host?.id;
       const path = thread.environment?.path?.trim();

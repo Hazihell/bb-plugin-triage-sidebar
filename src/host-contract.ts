@@ -13,6 +13,34 @@ export const reapedProcessSchema = z.object({
   command: z.string(),
 });
 
+/** The longest process summary one port row carries. */
+export const MAX_PORT_COMMAND_LENGTH = 120;
+
+/** One listening port and the process that owns it. */
+export const listeningPortSchema = z
+  .object({
+    port: z.number(),
+    pid: z.number(),
+    /**
+     * `node · vite --port 3000`: the owning process's command line, paths cut
+     * to their last segment and bounded. Empty when `ps` could not say.
+     */
+    command: z.string().max(MAX_PORT_COMMAND_LENGTH),
+  })
+  .strict();
+
+/** What one directory serves: the ports worth showing, then how many more. */
+export const portListingSchema = z
+  .object({
+    ports: z.array(listeningPortSchema),
+    /** Listeners past the per-directory cap, counted but not sent. */
+    more: z.number(),
+  })
+  .strict();
+
+export type ListeningPort = z.infer<typeof listeningPortSchema>;
+export type PortListing = z.infer<typeof portListingSchema>;
+
 export const hostContract = defineRpcContract({
   /**
    * Stop every process whose working directory is the directory or under it.
@@ -31,16 +59,16 @@ export const hostContract = defineRpcContract({
       .strict(),
   },
   /**
-   * The TCP ports listening under each directory, from one scan of the
-   * machine. Read-only: nothing is signalled. Every directory asked about has
-   * an entry, empty when nothing listens there.
+   * The TCP ports listening under each directory, with the process behind
+   * each, from one scan of the machine. Read-only: nothing is signalled.
+   * Every directory asked about has an entry, empty when nothing listens there.
    */
   listPorts: {
     input: z
       .object({ directories: z.array(z.string().min(1)).max(500) })
       .strict(),
     output: z
-      .object({ ports: z.record(z.string(), z.array(z.number())) })
+      .object({ ports: z.record(z.string(), portListingSchema) })
       .strict(),
   },
 });

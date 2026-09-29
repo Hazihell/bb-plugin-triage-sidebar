@@ -79,7 +79,7 @@ describe("host entry", () => {
   );
 
   // End to end on this machine: a server listening from a throwaway directory
-  // is found by one real lsof scan and credited to that directory.
+  // is found by one real lsof scan, credited to that directory, and named.
   it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
     "lists the port a process in the directory is listening on",
     async () => {
@@ -105,7 +105,19 @@ describe("host entry", () => {
       const result = await harness.experimental_call("listPorts", {
         directories: [directory],
       });
-      expect(result.ports).toEqual({ [directory]: [wanted] });
+      // The process behind it comes back too, named by one ps call.
+      expect(result.ports).toEqual({
+        [directory]: {
+          ports: [
+            {
+              port: wanted,
+              pid: child.pid,
+              command: expect.stringMatching(/^node · -e require\('http'\)/),
+            },
+          ],
+          more: 0,
+        },
+      });
     },
     15_000,
   );

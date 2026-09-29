@@ -5,8 +5,10 @@ import {
   MAX_PORTS_PER_DIRECTORY,
   parseAddressPort,
   parseCwds,
+  parseCommands,
   parseListeners,
   scanPorts,
+  summarizeCommand,
   type PortScanDeps,
 } from "./ports";
 
@@ -101,11 +103,58 @@ describe("comparePorts", () => {
   });
 });
 
+const PS_COMMANDS = ` 4101 node /Users/roger/w/app/node_modules/.bin/next dev
+ 4102 NODE_ENV=development API_TOKEN=s3cret /opt/homebrew/bin/node /w/app/node_modules/.bin/vite --port 5173
+`;
+
+describe("parseCommands", () => {
+  it("reads each pid's whole command line", () => {
+    expect(parseCommands(PS_COMMANDS)).toEqual(
+      new Map([
+        [4101, "node /Users/roger/w/app/node_modules/.bin/next dev"],
+        [
+          4102,
+          "NODE_ENV=development API_TOKEN=s3cret /opt/homebrew/bin/node /w/app/node_modules/.bin/vite --port 5173",
+        ],
+      ]),
+    );
+  });
+});
+
+describe("summarizeCommand", () => {
+  it("names the program, then the arguments with paths cut to their last segment", () => {
+    expect(summarizeCommand("node /w/app/node_modules/.bin/vite --port 3000")).toBe(
+      "node · vite --port 3000",
+    );
+    expect(summarizeCommand("/usr/local/bin/python3 -m http.server")).toBe(
+      "python3 · -m http.server",
+    );
+    expect(summarizeCommand("/opt/bin/caddy")).toBe("caddy");
+  });
+
+  it("never carries an environment assignment", () => {
+    const summary = summarizeCommand("NODE_ENV=dev API_TOKEN=s3cret node server.js");
+    expect(summary).toBe("node · server.js");
+    expect(summary).not.toContain("s3cret");
+  });
+
+  it("is bounded, with an ellipsis where it was cut", () => {
+    const summary = summarizeCommand(`node ${"--flag ".repeat(60)}`);
+    expect(summary).toHaveLength(120);
+    expect(summary.endsWith("…")).toBe(true);
+  });
+
+  it("is empty for nothing", () => {
+    expect(summarizeCommand("   ")).toBe("");
+  });
+});
+
 describe("scanPorts", () => {
   const deps = (overrides: Partial<PortScanDeps> = {}): PortScanDeps => ({
     home: "/Users/roger",
     readListeners: async () => LSOF_LISTEN,
     readCwds: async () => parseCwds(LSOF_CWD),
+    readCommands: async () => parseCommands(PS_COMMANDS),
     realpath: (directory) => directory,
     log: { warn: () => {} },
     ...overrides,
@@ -117,10 +166,49 @@ describe("scanPorts", () => {
       deps(),
     );
     expect(result).toEqual({
-      "/w/app": [3000],
-      "/w/app/.bb/worktrees/feat": [5173],
-      "/w/elsewhere": [],
+      "/w/app": {
+        ports: [{ port: 3000, pid: 4101, command: "node · next dev" }],
+        more: 0,
+      },
+      "/w/app/.bb/worktrees/feat": {
+        ports: [{ port: 5173, pid: 4102, command: "node · vite --port 5173" }],
+        more: 0,
+      },
+      "/w/elsewhere": { ports: [], more: 0 },
     });
+  });
+
+  it("asks ps once, only for the pids that were credited", async () => {
+    const asked: number[][] = [];
+    await scanPorts(
+      ["/w/app"],
+      deps({
+        readCommands: async (pids) => {
+          asked.push(pids);
+          return new Map();
+        },
+      }),
+    );
+    // 4103 is ephemeral loopback, 4300 works in /w/app-old, 4200 is postgres.
+    expect(asked).toEqual([[4101, 4102]]);
+  });
+
+  it("still reports the ports when ps fails, without commands", async () => {
+    const warnings: string[] = [];
+    const result = await scanPorts(
+      ["/w/app/.bb/worktrees/feat"],
+      deps({
+        readCommands: async () => {
+          throw new Error("no ps");
+        },
+        log: { warn: (message) => warnings.push(message) },
+      }),
+    );
+    expect(result["/w/app/.bb/worktrees/feat"]).toEqual({
+      ports: [{ port: 5173, pid: 4102, command: "" }],
+      more: 0,
+    });
+    expect(warnings).toHaveLength(1);
   });
 
   it("scans once, however many directories are asked about", async () => {
@@ -143,7 +231,7 @@ describe("scanPorts", () => {
       deps({ realpath: (directory) => directory.replace("/tmp/w", "/w") }),
     );
     // Only the checkout was asked about, so the worktree nested in it rolls up.
-    expect(result).toEqual({ "/tmp/w/app": [3000, 5173] });
+    expect(result["/tmp/w/app"]?.ports.map((entry) => entry.port)).toEqual([3000, 5173]);
   });
 
   it("credits nothing to the home directory or the root, and does not scan for them", async () => {
@@ -155,14 +243,18 @@ describe("scanPorts", () => {
         },
       }),
     );
-    expect(result).toEqual({ "/Users/roger": [], "/": [] });
+    expect(result).toEqual({
+      "/Users/roger": { ports: [], more: 0 },
+      "/": { ports: [], more: 0 },
+    });
   });
 
-  it("caps what one directory reports", async () => {
+  it("caps what one directory reports, well-known dev ports first, and counts the rest", async () => {
     const rows = Array.from(
       { length: 12 },
       (_, index) => `node 5000 roger 1u IPv4 0x0 0t0 TCP *:${7000 + index} (LISTEN)`,
     );
+    rows.push("node 5000 roger 1u IPv4 0x0 0t0 TCP *:8080 (LISTEN)");
     const result = await scanPorts(
       ["/w/app"],
       deps({
@@ -170,7 +262,10 @@ describe("scanPorts", () => {
         readCwds: async () => new Map([[5000, "/w/app"]]),
       }),
     );
-    expect(result["/w/app"]).toHaveLength(MAX_PORTS_PER_DIRECTORY);
+    const listing = result["/w/app"]!;
+    expect(listing.ports).toHaveLength(MAX_PORTS_PER_DIRECTORY);
+    expect(listing.ports[0]?.port).toBe(8080);
+    expect(listing.more).toBe(13 - MAX_PORTS_PER_DIRECTORY);
   });
 
   it("reports empty entries when lsof fails", async () => {
@@ -184,7 +279,7 @@ describe("scanPorts", () => {
         log: { warn: (message) => warnings.push(message) },
       }),
     );
-    expect(result).toEqual({ "/w/app": [] });
+    expect(result).toEqual({ "/w/app": { ports: [], more: 0 } });
     expect(warnings).toHaveLength(1);
   });
 });

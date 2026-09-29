@@ -1,5 +1,5 @@
 /**
- * The server's side of port pills: route the sidebar's directories to the
+ * The server's side of the port card: route the sidebar's directories to the
  * machines that hold them, one host call per machine.
  *
  * The sidebar already knows each thread's machine and checkout path, so it
@@ -7,8 +7,9 @@
  * The server only groups, fans out and bounds; the host does the scan.
  */
 import { z } from "zod";
+import { portListingSchema, type PortListing } from "./host-contract";
 
-/** How long one machine's scan may take before its pills are left out. */
+/** How long one machine's scan may take before its ports are left out. */
 const PORT_SCAN_TIMEOUT_MS = 10_000;
 
 export const portsRpcContract = {
@@ -31,7 +32,7 @@ export const portsRpcContract = {
         z.object({
           hostId: z.string(),
           directory: z.string(),
-          ports: z.array(z.number()),
+          listing: portListingSchema,
         }),
       ),
     }),
@@ -47,7 +48,7 @@ export interface PortRpcDeps {
     hostId: string,
     directories: string[],
     options: { timeoutMs: number },
-  ) => Promise<{ ports: Record<string, number[]> }>;
+  ) => Promise<{ ports: Record<string, PortListing> }>;
   log: { warn: (message: string) => void };
 }
 
@@ -70,13 +71,13 @@ export function createPortHandlers(deps: PortRpcDeps) {
             const { ports } = await deps.scanHost(hostId, [...directories], {
               timeoutMs: PORT_SCAN_TIMEOUT_MS,
             });
-            return Object.entries(ports).map(([directory, list]) => ({
+            return Object.entries(ports).map(([directory, listing]) => ({
               hostId,
               directory,
-              ports: list,
+              listing,
             }));
           } catch (error) {
-            // An unreachable machine shows no pills; the next poll asks again.
+            // An unreachable machine shows no ports; the next poll asks again.
             deps.log.warn(`ports: could not scan host ${hostId} (${String(error)})`);
             return [];
           }

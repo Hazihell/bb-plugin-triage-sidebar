@@ -20,6 +20,7 @@ import { SlimRow } from "./SlimRow";
 import { isWorking, useLifecycle } from "./useLifecycle";
 import { useCacheWindow } from "./useCacheWindow";
 import { usePorts } from "./usePorts";
+import type { PortListing } from "./host-contract";
 import { useClock } from "./clock";
 import type { CacheWindow } from "./cache-window";
 import { useProjectAvatars } from "./useProjectAvatars";
@@ -380,7 +381,7 @@ function ParkedShelf({
   onNavigate: () => void;
   now: number;
   cacheWindow: CacheWindow;
-  ports: ReadonlyMap<string, readonly number[]>;
+  ports: ReadonlyMap<string, PortListing>;
 }) {
   if (threads.length === 0) return null;
   return (

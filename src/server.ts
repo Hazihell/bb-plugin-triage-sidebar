@@ -600,7 +600,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Show listening ports on threads",
       description:
-        "Shows a pill such as :3000 on a thread whose worktree or checkout has something listening — a dev server, a preview. While the sidebar is open, the machine holding the worktree lists its listening sockets about every ten seconds; nothing is started, stopped or sent anywhere. Turn this off to stop the scan.",
+        "Shows a plug icon on a thread whose worktree or checkout has something listening — a dev server, a preview — with a card listing each port and the process behind it. While the sidebar is open, the machine holding the worktree lists its listening sockets and their commands about every ten seconds; nothing is started, stopped or sent anywhere. Turn this off to stop the scan.",
       default: true,
     },
     localFaviconsEnabled: {

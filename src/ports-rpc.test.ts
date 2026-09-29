@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPortHandlers, type PortRpcDeps } from "./ports-rpc";
+import type { PortListing } from "./host-contract";
+
+const listing = (port: number): PortListing => ({
+  ports: [{ port, pid: 42, command: "node · vite" }],
+  more: 0,
+});
 
 function handlers(overrides: Partial<PortRpcDeps> = {}) {
   const scanHost = vi.fn<PortRpcDeps["scanHost"]>(async (_hostId, directories) => ({
-    ports: Object.fromEntries(directories.map((d) => [d, [3000]])),
+    ports: Object.fromEntries(directories.map((d) => [d, listing(3000)])),
   }));
   const deps: PortRpcDeps = {
     readEnabled: async () => true,
@@ -43,7 +49,7 @@ describe("listPorts", () => {
     const { listPorts } = handlers({
       scanHost: async (hostId, directories) => {
         if (hostId === "down") throw new Error("offline");
-        return { ports: Object.fromEntries(directories.map((d) => [d, [5173]])) };
+        return { ports: Object.fromEntries(directories.map((d) => [d, listing(5173)])) };
       },
     });
     const result = await listPorts({
@@ -52,6 +58,6 @@ describe("listPorts", () => {
         { hostId: "up", directories: ["/b"] },
       ],
     });
-    expect(result.ports).toEqual([{ hostId: "up", directory: "/b", ports: [5173] }]);
+    expect(result.ports).toEqual([{ hostId: "up", directory: "/b", listing: listing(5173) }]);
   });
 });
