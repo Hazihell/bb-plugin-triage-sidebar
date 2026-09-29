@@ -882,6 +882,14 @@ export default function plugin(bb: BbPluginApi) {
         { directories },
         { hostId, signal: lifetime.signal, timeoutMs },
       ),
+    resolveThread: async (threadId) => {
+      const { environmentId } = await bb.sdk.threads.get({ threadId });
+      if (!environmentId) return null;
+      const { hostId, path } = await bb.sdk.environments.get({ environmentId });
+      return path?.trim() ? { hostId, directory: path.trim() } : null;
+    },
+    stopOnHost: (hostId, input, { timeoutMs }) =>
+      hostClient.call("stopPort", input, { hostId, signal: lifetime.signal, timeoutMs }),
     log: bb.log,
   });
 

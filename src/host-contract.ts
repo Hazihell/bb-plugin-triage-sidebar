@@ -38,7 +38,21 @@ export const portListingSchema = z
   })
   .strict();
 
+/**
+ * What stopping one port's process came to. `changed` means the pid is no
+ * longer the one listening on that port under that directory, so nothing was
+ * signalled and the card should look again.
+ */
+export const portStopReportSchema = z
+  .object({
+    result: z.enum(["killed", "already-gone", "changed", "refused", "failed"]),
+    /** A short line for the card, when there is something to say. */
+    message: z.string().nullable(),
+  })
+  .strict();
+
 export type ListeningPort = z.infer<typeof listeningPortSchema>;
+export type PortStopReport = z.infer<typeof portStopReportSchema>;
 export type PortListing = z.infer<typeof portListingSchema>;
 
 export const hostContract = defineRpcContract({
@@ -70,5 +84,21 @@ export const hostContract = defineRpcContract({
     output: z
       .object({ ports: z.record(z.string(), portListingSchema) })
       .strict(),
+  },
+  /**
+   * Stop the process listening on one port under a directory: SIGTERM, then
+   * SIGKILL after a grace period. The host scans again first and signals only
+   * if that pid still listens on that port with its working directory under
+   * the directory; otherwise it answers `changed` and signals nothing.
+   */
+  stopPort: {
+    input: z
+      .object({
+        directory: z.string().min(1),
+        port: z.number().int().min(1).max(65535),
+        pid: z.number().int().positive(),
+      })
+      .strict(),
+    output: portStopReportSchema,
   },
 });

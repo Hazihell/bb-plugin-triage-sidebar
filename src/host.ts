@@ -19,6 +19,7 @@ import {
 import { hostContract } from "./host-contract";
 import { reapDirectory, type DirectoryReapDeps } from "./reap";
 import { parseCommands, parseCwds, scanPorts, type PortScanDeps } from "./ports";
+import { stopPort, type PortStopDeps } from "./port-stop";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,9 +111,19 @@ export const portScanDeps: PortScanDeps = {
   log: { warn: (message) => console.warn(message) },
 };
 
+export const portStopDeps: PortStopDeps = {
+  ...portScanDeps,
+  signal: (pid, signal) => process.kill(pid, signal),
+  isAlive,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  // This entry's own process, and the bb process that started it.
+  protectedPids: [process.pid, process.ppid],
+};
+
 export function createHostEntry(
   deps: DirectoryReapDeps = hostDeps,
   portDeps: PortScanDeps = portScanDeps,
+  stopDeps: PortStopDeps = portStopDeps,
 ) {
   return experimental_defineHostEntry({
     contract: hostContract,
@@ -121,6 +132,7 @@ export function createHostEntry(
       listPorts: async ({ directories }) => ({
         ports: await scanPorts(directories, portDeps),
       }),
+      stopPort: (input) => stopPort(input, stopDeps),
     },
   });
 }

@@ -11,15 +11,26 @@ const listInstances = vi.fn(async (_input: { hostId: string }) => ({
 }));
 const createTab = vi.fn(async (_input: Record<string, unknown>) => ({ tab: { tabId: "tab_1" } }));
 const revealTab = vi.fn(async (_input: Record<string, unknown>) => ({ ok: true }));
+const rpcCall = vi.fn(
+  async (_method: string, _input: Record<string, unknown>): Promise<unknown> => ({
+    result: "killed",
+    message: null,
+  }),
+);
 vi.mock("@get-bb/plugin-sdk/app", () => ({
   useBbNavigate: () => ({ openUrl, toThread }),
+  useRpc: () => ({ call: rpcCall }),
   useSdk: () => ({
     hosts: { list: listHosts },
     experimental_desktopBrowsers: { listInstances, createTab, revealTab },
   }),
 }));
 
-const { PortsMenu, PORTS_CLOSE_DELAY_MS, PORT_ROW_TITLE } = await import("./PortsMenu");
+const { PortsMenu, PORTS_CLOSE_DELAY_MS, PORT_ROW_TITLE, STOP_CONFIRM_MS } = await import(
+  "./PortsMenu"
+);
+const { PortsRefreshContext } = await import("./usePorts");
+const refreshPorts = vi.fn(() => {});
 
 const LISTING: PortListing = {
   ports: [
@@ -33,6 +44,8 @@ beforeEach(() => {
   for (const mock of [openUrl, toThread, listHosts, listInstances, createTab, revealTab]) {
     mock.mockClear();
   }
+  rpcCall.mockClear();
+  refreshPorts.mockClear();
 });
 afterEach(() => {
   cleanup();
@@ -42,9 +55,11 @@ afterEach(() => {
 /** A stand-in for the row's full-bleed link, which must not see the click. */
 function Row({ onRow, listing = LISTING }: { onRow?: () => void; listing?: PortListing }) {
   return (
-    <div onClick={onRow}>
-      <PortsMenu threadId="thr_1" listing={listing} />
-    </div>
+    <PortsRefreshContext.Provider value={refreshPorts}>
+      <div onClick={onRow}>
+        <PortsMenu threadId="thr_1" listing={listing} />
+      </div>
+    </PortsRefreshContext.Provider>
   );
 }
 
@@ -164,5 +179,95 @@ describe("PortsMenu", () => {
       ),
     );
     expect(openUrl).toHaveBeenCalledTimes(1);
+  });
+
+  describe("stop", () => {
+    const stopButton = (port = 3000) =>
+      screen.getByRole("button", { name: `Stop the process on localhost:${port}` });
+    const confirmButton = (port = 3000, pid = 4101) =>
+      screen.getByRole("button", { name: `Confirm stopping pid ${pid} on localhost:${port}` });
+
+    async function openCard(onRow?: () => void) {
+      render(<Row onRow={onRow} />);
+      hover(plug());
+      await waitFor(() => expect(card()).not.toBeNull());
+    }
+
+    it("asks first, keeps the command in view, and kills on the second click", async () => {
+      const onRow = vi.fn();
+      await openCard(onRow);
+      fireEvent.click(stopButton());
+      expect(rpcCall).not.toHaveBeenCalled();
+      expect(confirmButton().textContent).toBe("Confirm stop?");
+      expect(confirmButton().getAttribute("title")).toBe("node · vite --port 3000");
+      expect(card()!.textContent).toContain("node · vite --port 3000");
+
+      fireEvent.click(confirmButton());
+      expect(
+        screen.getByRole("button", { name: "Stopping the process on localhost:3000" }).textContent,
+      ).toBe("Stopping…");
+      await waitFor(() => expect(refreshPorts).toHaveBeenCalledTimes(1));
+      expect(rpcCall).toHaveBeenCalledWith("stopPort", {
+        threadId: "thr_1",
+        port: 3000,
+        pid: 4101,
+      });
+      expect(onRow).not.toHaveBeenCalled();
+      expect(card()).not.toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+
+    it("stands down when the second click does not come in time", async () => {
+      await openCard();
+      vi.useFakeTimers();
+      fireEvent.click(stopButton());
+      act(() => vi.advanceTimersByTime(STOP_CONFIRM_MS + 10));
+      expect(stopButton()).not.toBeNull();
+      fireEvent.click(stopButton());
+      expect(rpcCall).not.toHaveBeenCalled();
+    });
+
+    it("keeps a card opened by hover open once a stop starts", async () => {
+      await openCard();
+      vi.useFakeTimers();
+      fireEvent.click(stopButton());
+      unhover(card()!);
+      act(() => vi.advanceTimersByTime(PORTS_CLOSE_DELAY_MS * 2));
+      expect(card()).not.toBeNull();
+    });
+
+    it("refreshes and says so when the port changed underneath", async () => {
+      rpcCall.mockResolvedValueOnce({ result: "changed", message: null });
+      await openCard();
+      fireEvent.click(stopButton());
+      fireEvent.click(confirmButton());
+      await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/changed/));
+      expect(refreshPorts).toHaveBeenCalledTimes(1);
+      expect(stopButton()).not.toBeNull();
+    });
+
+    it("shows a refusal inline, and does not refresh for it", async () => {
+      rpcCall.mockResolvedValueOnce({
+        result: "refused",
+        message: "Refused: the home directory or one above it",
+      });
+      await openCard();
+      fireEvent.click(stopButton());
+      fireEvent.click(confirmButton());
+      await waitFor(() =>
+        expect(screen.getByRole("status").textContent).toBe(
+          "Refused: the home directory or one above it",
+        ),
+      );
+      expect(refreshPorts).not.toHaveBeenCalled();
+    });
+
+    it("shows a failed call inline", async () => {
+      rpcCall.mockRejectedValueOnce(new Error("offline"));
+      await openCard();
+      fireEvent.click(stopButton());
+      fireEvent.click(confirmButton());
+      await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/reach/));
+    });
   });
 });

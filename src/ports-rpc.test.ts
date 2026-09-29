@@ -14,6 +14,8 @@ function handlers(overrides: Partial<PortRpcDeps> = {}) {
   const deps: PortRpcDeps = {
     readEnabled: async () => true,
     scanHost,
+    resolveThread: async () => ({ hostId: "h1", directory: "/w/a" }),
+    stopOnHost: async () => ({ result: "killed", message: null }),
     log: { warn: () => {} },
     ...overrides,
   };
@@ -59,5 +61,60 @@ describe("listPorts", () => {
       ],
     });
     expect(result.ports).toEqual([{ hostId: "up", directory: "/b", listing: listing(5173) }]);
+  });
+});
+
+describe("stopPort", () => {
+  it("sends the thread's own machine and directory, never the sidebar's", async () => {
+    const stopOnHost = vi.fn<PortRpcDeps["stopOnHost"]>(async () => ({
+      result: "killed",
+      message: null,
+    }));
+    const { stopPort } = handlers({
+      resolveThread: async (threadId) =>
+        threadId === "thr_1" ? { hostId: "h2", directory: "/w/thr_1" } : null,
+      stopOnHost,
+    });
+    expect(await stopPort({ threadId: "thr_1", port: 3000, pid: 42 })).toEqual({
+      result: "killed",
+      message: null,
+    });
+    expect(stopOnHost).toHaveBeenCalledWith(
+      "h2",
+      { directory: "/w/thr_1", port: 3000, pid: 42 },
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
+  });
+
+  it("passes the host's changed and refused answers through", async () => {
+    for (const report of [
+      { result: "changed", message: null },
+      { result: "refused", message: "Refused: the home directory or one above it" },
+    ] as const) {
+      const { stopPort } = handlers({ stopOnHost: async () => report });
+      expect(await stopPort({ threadId: "thr_1", port: 3000, pid: 42 })).toEqual(report);
+    }
+  });
+
+  it("refuses a thread with no directory, and stops nothing while ports are off", async () => {
+    const stopOnHost = vi.fn<PortRpcDeps["stopOnHost"]>();
+    const noDirectory = handlers({ resolveThread: async () => null, stopOnHost });
+    expect((await noDirectory.stopPort({ threadId: "thr_1", port: 3000, pid: 42 })).result).toBe(
+      "refused",
+    );
+    const off = handlers({ readEnabled: async () => false, stopOnHost });
+    expect((await off.stopPort({ threadId: "thr_1", port: 3000, pid: 42 })).result).toBe(
+      "refused",
+    );
+    expect(stopOnHost).not.toHaveBeenCalled();
+  });
+
+  it("reports an unreachable machine as failed", async () => {
+    const { stopPort } = handlers({
+      stopOnHost: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect((await stopPort({ threadId: "thr_1", port: 3000, pid: 42 })).result).toBe("failed");
   });
 });

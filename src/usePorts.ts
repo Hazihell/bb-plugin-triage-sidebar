@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import type { triageSidebarRpcContract } from "./server";
 import type { PortListing } from "./host-contract";
@@ -7,6 +7,12 @@ import type { PortListing } from "./host-contract";
 export const PORTS_POLL_MS = 10_000;
 
 const NO_PORTS: ReadonlyMap<string, PortListing> = new Map();
+
+/**
+ * Look again now rather than at the next tick, for a row that has just
+ * stopped a port. Absent outside the list, where it does nothing.
+ */
+export const PortsRefreshContext = createContext<() => void>(() => {});
 
 /** Every machine's thread directories, deduplicated, in a stable order. */
 export function portTargets(
@@ -33,16 +39,21 @@ export function portTargets(
  * to look. It looks only while the list is mounted and the window visible,
  * and once more when the window regains focus — the moment a user comes back
  * from starting a server elsewhere. No thread with a directory, no call.
+ *
+ * `refresh` looks at once. Asked while a look is in flight, it looks again
+ * when that one lands, since the answer on its way may predate the change.
  */
-export function usePorts(
-  threads: readonly PluginSidebarThread[],
-): ReadonlyMap<string, PortListing> {
+export function usePorts(threads: readonly PluginSidebarThread[]): {
+  ports: ReadonlyMap<string, PortListing>;
+  refresh: () => void;
+} {
   const rpc = useRpc<typeof triageSidebarRpcContract>();
   const targets = useMemo(() => portTargets(threads), [threads]);
   // The effect restarts only when the set of directories changes, not on
   // every thread update that leaves them alone.
   const targetsKey = JSON.stringify(targets);
   const [byDirectory, setByDirectory] = useState<ReadonlyMap<string, PortListing>>(NO_PORTS);
+  const refreshNow = useRef<() => void>(() => {});
 
   useEffect(() => {
     const request = JSON.parse(targetsKey) as typeof targets;
@@ -52,8 +63,13 @@ export function usePorts(
     }
     let cancelled = false;
     let inFlight = false;
-    const refresh = async () => {
-      if (inFlight || document.visibilityState !== "visible") return;
+    let again = false;
+    const refresh = async (): Promise<void> => {
+      if (inFlight) {
+        again = again || document.visibilityState === "visible";
+        return;
+      }
+      if (document.visibilityState !== "visible") return;
       inFlight = true;
       try {
         const result = await rpc.call("listPorts", { targets: request });
@@ -70,7 +86,12 @@ export function usePorts(
       } finally {
         inFlight = false;
       }
+      if (again && !cancelled) {
+        again = false;
+        return refresh();
+      }
     };
+    refreshNow.current = () => void refresh();
     void refresh();
     const timer = window.setInterval(() => void refresh(), PORTS_POLL_MS);
     const onFocus = () => void refresh();
@@ -78,13 +99,15 @@ export function usePorts(
     document.addEventListener("visibilitychange", onFocus);
     return () => {
       cancelled = true;
+      refreshNow.current = () => {};
       window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
   }, [rpc, targetsKey]);
 
-  return useMemo(() => {
+  const refresh = useCallback(() => refreshNow.current(), []);
+  const ports = useMemo(() => {
     if (byDirectory.size === 0) return NO_PORTS;
     const byThread = new Map<string, PortListing>();
     for (const thread of threads) {
@@ -96,4 +119,5 @@ export function usePorts(
     }
     return byThread;
   }, [byDirectory, threads]);
+  return { ports, refresh };
 }

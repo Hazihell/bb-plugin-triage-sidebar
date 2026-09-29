@@ -19,7 +19,7 @@ import type { ParkMenuActions } from "./RowContextMenu";
 import { SlimRow } from "./SlimRow";
 import { isWorking, useLifecycle } from "./useLifecycle";
 import { useCacheWindow } from "./useCacheWindow";
-import { usePorts } from "./usePorts";
+import { PortsRefreshContext, usePorts } from "./usePorts";
 import { ThreadCommandsProvider } from "./ThreadCommandsProvider";
 import type { PortListing } from "./host-contract";
 import { useClock } from "./clock";
@@ -132,7 +132,7 @@ export function ThreadInbox({
 
   // Only the rows this list can show are scanned for; a child shares its
   // parent's worktree, and one scan per machine covers every directory.
-  const ports = usePorts(
+  const { ports, refresh: refreshPorts } = usePorts(
     useMemo(
       () => [...live.pinned, ...live.inbox, ...live.snoozed, ...live.settled],
       [live],
@@ -275,6 +275,7 @@ export function ThreadInbox({
         className="relative min-h-0 flex-1 overflow-y-auto px-1.5 pb-2"
       >
         <OrderHoldContext.Provider value={orderHold}>
+        <PortsRefreshContext.Provider value={refreshPorts}>
         <ThreadCommandsProvider projects={projects}>
         {status === "loading" ||
         (lifecycle.source === "none" && lifecycle.status === "loading") ? (
@@ -340,6 +341,7 @@ export function ThreadInbox({
           </>
         )}
         </ThreadCommandsProvider>
+        </PortsRefreshContext.Provider>
         </OrderHoldContext.Provider>
       </div>
     </div>
