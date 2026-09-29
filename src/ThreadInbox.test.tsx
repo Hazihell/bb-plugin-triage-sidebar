@@ -337,6 +337,12 @@ describe("parking threads", () => {
     expect(await screen.findByText("Still running")).toBeDefined();
     expect(screen.queryByRole("region", { name: "Settled" })).toBeNull();
     expect(screen.queryByLabelText("Settle thread")).toBeNull();
+    // With no actions to show, hover leaves the status slot drawn.
+    const slot = screen
+      .getByText("Still running")
+      .closest("li")!
+      .querySelector(".w-12")!.parentElement!;
+    expect(slot.className).not.toContain("group-hover/card:hidden");
   });
 
   const activityOf = (counts: Partial<PluginSidebarThread["activity"]>) => ({
@@ -1721,7 +1727,8 @@ describe("project avatars in the list", () => {
     await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(1));
     const line = firstLine();
     expect(line.className).toContain("h-5");
-    expect(line.lastElementChild!.className).toContain("w-12");
+    // The slot ends the line, inside the aside it yields to on hover.
+    expect(line.lastElementChild!.lastElementChild!.firstElementChild!.className).toContain("w-12");
     // Fixed size and no shrinking: an avatar that measured its own content
     // would move the project name every time an image finished loading.
     expect(line.children[0]!.className).toContain("size-3.5");

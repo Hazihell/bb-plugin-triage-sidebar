@@ -87,15 +87,28 @@ export function SlimRow({
           >
             <ThreadTitle threadId={thread.id} />
           </span>
-          <PortsMenu threadId={thread.id} listing={ports} />
           <ThreadCommandsButton thread={thread} row="slim" />
-          {/* Left of the slot, as on a card: the jump key while the modifier
-              is held; otherwise, for a snoozed row, when it comes back, which
-              yields on hover to the restore button. The slot itself keeps the
-              card's glyph and clock, in the card's column. */}
+          <PortsMenu threadId={thread.id} listing={ports} />
+          {/* As on a card: the jump key left of the slot while the modifier
+              is held; otherwise, for a snoozed row, when it comes back, and
+              the slot with the card's glyph and clock in the card's column,
+              both yielding on hover to the restore button. */}
           <RowAside
             row="slim"
             shortcut={shortcut}
+            status={
+              <span
+                className={cn(STATUS_SLOT_CLASS, "pointer-events-none relative")}
+              >
+                <StatusOrTime
+                  thread={thread}
+                  now={now}
+                  startedWorkingAt={startedWorkingAt}
+                  lastRunEndedAt={lastRunEndedAt}
+                  cacheWindow={cacheWindow}
+                />
+              </span>
+            }
             rest={
               wakeLabel === null ? null : (
                 <span
@@ -126,17 +139,6 @@ export function SlimRow({
               />
             </button>
           </RowAside>
-          <span
-            className={cn(STATUS_SLOT_CLASS, "pointer-events-none relative")}
-          >
-            <StatusOrTime
-              thread={thread}
-              now={now}
-              startedWorkingAt={startedWorkingAt}
-              lastRunEndedAt={lastRunEndedAt}
-              cacheWindow={cacheWindow}
-            />
-          </span>
         </div>
       </li>
     </RowContextMenu>

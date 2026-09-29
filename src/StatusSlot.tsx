@@ -33,8 +33,9 @@ import {
  * and the clocks another, and a row with no glyph keeps its clock where every
  * other row has it.
  *
- * Nothing else ever enters this slot. The jump-key pill and the hover actions
- * sit to its left, so the clock never moves and is never covered.
+ * Nothing else ever enters this slot. The jump-key pill sits to its left, so
+ * the clock never moves; the hover actions replace the whole slot on the one
+ * row being hovered or focused.
  */
 export const STATUS_SLOT_CLASS = "flex w-12 shrink-0 items-center justify-end";
 
@@ -58,7 +59,8 @@ export const TRAILING_GLYPH_BOX_CLASS =
  * The clock is ALWAYS drawn. The glyph says what state the thread is in; the
  * clock says how long it has been in it, and on an idle thread that is the
  * number that decides whether replying resumes a cached conversation or pays
- * to rebuild one. No glyph, key pill or action ever takes its place.
+ * to rebuild one. No glyph or key pill ever takes its place; only the row's
+ * own actions, while that row is hovered or focused.
  *
  * Which clock depends on whether the thread's agent is inside a turn. A turn
  * is a duration being accrued, counted from when bb logged it starting.

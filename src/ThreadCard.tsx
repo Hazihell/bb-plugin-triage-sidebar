@@ -136,23 +136,27 @@ export function ThreadCard({
             <span className="min-w-0 flex-1 truncate text-2xs font-medium text-muted-foreground">
               {projectName ?? " "}
             </span>
-            {/* Left of the slot, never in it: the jump key while the
-                modifier is held, otherwise the park actions on hover or
-                keyboard focus. The slot keeps its glyph and clock through
-                all of it. */}
-            <RowAside row="card" shortcut={shortcut}>
+            {/* The jump key left of the slot while the modifier is held;
+                otherwise the park actions, in the slot's place, on hover or
+                keyboard focus. */}
+            <RowAside
+              row="card"
+              shortcut={shortcut}
+              status={
+                <span className={STATUS_SLOT_CLASS}>
+                  <StatusOrTime
+                    thread={thread}
+                    now={now}
+                    startedWorkingAt={startedWorkingAt}
+                    lastRunEndedAt={lastRunEndedAt}
+                    isChildWorking={childWork.running > 0}
+                    cacheWindow={cacheWindow}
+                  />
+                </span>
+              }
+            >
               {park.canPark ? <ParkActions park={park} /> : null}
             </RowAside>
-            <span className={STATUS_SLOT_CLASS}>
-              <StatusOrTime
-                thread={thread}
-                now={now}
-                startedWorkingAt={startedWorkingAt}
-                lastRunEndedAt={lastRunEndedAt}
-                isChildWorking={childWork.running > 0}
-                cacheWindow={cacheWindow}
-              />
-            </span>
           </div>
           <div
             className={cn(
@@ -214,8 +218,8 @@ export function ThreadCard({
                 className={WAITING_COLOR}
               />
             ) : null}
-            <PortsMenu threadId={thread.id} listing={ports} />
             <ThreadCommandsButton thread={thread} row="card" />
+            <PortsMenu threadId={thread.id} listing={ports} />
             {pullRequest ? (
               <a
                 href={pullRequest.url}
@@ -251,7 +255,7 @@ export function ThreadCard({
 }
 
 /**
- * Settle and snooze, shown beside the status slot by {@link RowAside}.
+ * Settle and snooze, shown in the status slot's place by {@link RowAside}.
  *
  * Snooze opens the same presets as the right-click menu rather than picking
  * one: "tomorrow" is the wrong answer at 10am, and a second click is cheaper

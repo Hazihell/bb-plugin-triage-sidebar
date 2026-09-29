@@ -84,12 +84,12 @@ Three shelves:
   read its logged start from bb, then steps forward to that; the logged time is
   never later.
 
-  Two things sit just left of the slot and never in it. While you hold the
-  command key, bb's jump key for the row. On hover or keyboard focus, a card
-  that can be parked shows **Snooze**, which opens a menu of presets, and
-  **Settle**. A phone or tablet, which has no hover, never draws them, nor a
-  parked row's restore button: beside the slot's glyph and time there is
-  nothing, and long-press opens the row menu instead.
+  While you hold the command key, bb's jump key for the row sits just left of
+  the slot. On hover or keyboard focus, the row's actions take the slot's
+  place at the right edge: a card that can be parked shows **Snooze**, which
+  opens a menu of presets, and **Settle**. A phone or tablet, which has no
+  hover, never draws them, nor a parked row's restore button: the slot's glyph
+  and time stay, and long-press opens the row menu instead.
 
   The glyphs are bb's own, so the two lists speak one language: the red
   circle-x for a failure or a message that failed to send, the amber
